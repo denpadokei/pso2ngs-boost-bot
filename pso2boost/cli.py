@@ -14,6 +14,7 @@ from .article import apply_details, parse_article_html
 from .discover import discover_from_rss
 from .discord_events import ScheduledEventsApi
 from .fetch import SITE, SCHEDULE_URL, FetchError, Fetcher
+from .lookup import TEXT_CHANNEL_TYPES, DiscordLookup, DiscordLookupError
 from .maintenance import fetch_calendar
 from .models import BoostEvent, merge_events
 from .notify import DiscordNotifier
@@ -48,22 +49,47 @@ def _due_today(moment: datetime | None, now: datetime) -> bool:
 
 
 def _notifier(args) -> DiscordNotifier:
+    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    channel_id = "" if os.getenv("DISCORD_WEBHOOK_URL") else _resolve_channel_id(token)
     return DiscordNotifier(
         webhook_url=os.getenv("DISCORD_WEBHOOK_URL"),
         mention_role_id=os.getenv("DISCORD_MENTION_ROLE_ID"),
         dry_run=args.dry_run,
         style=os.getenv("NOTIFY_STYLE", "discal"),
-        bot_token=os.getenv("DISCORD_BOT_TOKEN"),
-        channel_id=os.getenv("DISCORD_CHANNEL_ID"),
+        bot_token=token,
+        channel_id=channel_id,
     )
 
 
 def _discord_api() -> ScheduledEventsApi | None:
     token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        return None
     guild_id = os.getenv("DISCORD_GUILD_ID", "").strip()
-    if not token or not guild_id:
+    try:
+        guild_id = DiscordLookup(token).resolve_guild_id(guild_id or None)
+    except DiscordLookupError as exc:
+        log.error("サーバーを特定できませんでした: %s", exc)
         return None
     return ScheduledEventsApi(token, guild_id)
+
+
+def _resolve_channel_id(token: str) -> str:
+    channel_id = os.getenv("DISCORD_CHANNEL_ID", "").strip()
+    if channel_id:
+        return channel_id
+
+    name = os.getenv("DISCORD_CHANNEL_NAME", "").strip()
+    if not name or not token:
+        return ""
+
+    try:
+        lookup = DiscordLookup(token)
+        guild_id = lookup.resolve_guild_id(os.getenv("DISCORD_GUILD_ID", "").strip() or None)
+        return lookup.resolve_channel_id(guild_id, name=name)
+    except DiscordLookupError as exc:
+        log.error("投稿先チャンネルを特定できませんでした: %s", exc)
+        return ""
 
 
 def _enrich(event: BoostEvent, fetcher: Fetcher, now: datetime) -> BoostEvent:
@@ -236,6 +262,36 @@ def cmd_list(args) -> int:
     return 0
 
 
+def cmd_channels(args) -> int:
+    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        log.error("DISCORD_BOT_TOKEN が未設定です")
+        return 2
+
+    lookup = DiscordLookup(token)
+    try:
+        guilds = lookup.guilds()
+    except DiscordLookupError as exc:
+        log.error("%s", exc)
+        return 2
+
+    if not guilds:
+        print("Bot はどのサーバーにも参加していません。先に招待してください。")
+        return 1
+
+    for guild in guilds:
+        print(f"{guild.get('name')}  DISCORD_GUILD_ID={guild.get('id')}")
+        try:
+            channels = lookup.channels(str(guild["id"]))
+        except DiscordLookupError as exc:
+            print(f"  チャンネルを取得できませんでした: {exc}")
+            continue
+        for channel in channels:
+            if channel.get("type") in TEXT_CHANNEL_TYPES:
+                print(f"  #{channel.get('name')}  DISCORD_CHANNEL_ID={channel.get('id')}")
+    return 0
+
+
 def cmd_preview(args) -> int:
     now = _parse_now(args.now)
     fetcher = Fetcher(delay=args.delay)
@@ -356,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     common(list_cmd)
     list_cmd.add_argument("--json", action="store_true")
     list_cmd.set_defaults(func=cmd_list)
+
+    channels = sub.add_parser(
+        "channels", help="Bot が参加しているサーバーとチャンネルIDを表示する"
+    )
+    channels.set_defaults(func=cmd_channels)
 
     preview = sub.add_parser("preview", help="告知記事の解析結果を表示する")
     preview.add_argument("url")

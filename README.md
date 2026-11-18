@@ -146,13 +146,32 @@ https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permis
 
 ```dotenv
 DISCORD_BOT_TOKEN=あなたのBotトークン
-DISCORD_GUILD_ID=サーバーID
-DISCORD_CHANNEL_ID=投稿先チャンネルID   # Bot で投稿する場合
+DISCORD_GUILD_ID=サーバーID                     # Bot が1サーバーだけなら省略可
+DISCORD_CHANNEL_ID=投稿先チャンネルID           # 名前で指定するなら不要
+# DISCORD_CHANNEL_NAME=テスト                   # # は付けなくてよい
 ```
+
+`DISCORD_GUILD_ID` を省略すると、Bot が参加しているサーバーが1つの場合だけ自動で判定します。
+`DISCORD_CHANNEL_ID` の代わりに `DISCORD_CHANNEL_NAME` を指定すると、名前から解決します。
 
 サーバーID・チャンネルIDは、Discord の設定 →「詳細設定」→「開発者モード」を有効にして、
 サーバー名／チャンネル名を右クリック →「IDをコピー」で取得できます。
 Webhook で投稿する場合は `DISCORD_CHANNEL_ID` は不要です。
+
+ID を調べるのが面倒な場合は、Bot トークンだけで一覧を出せます。
+
+```bash
+python -m pso2boost channels
+```
+
+```
+デンパの鯖  DISCORD_GUILD_ID=123456789012345678
+  #テスト  DISCORD_CHANNEL_ID=123456789012345678
+  #general  DISCORD_CHANNEL_ID=123456789012345679
+```
+
+招待画面でサーバーは選べますが、その ID はアプリに渡りません。
+チャンネルは招待では選べないため、上のコマンドか `DISCORD_CHANNEL_NAME` を使ってください。
 
 ```bash
 python -m pso2boost check --dry-run
@@ -175,6 +194,7 @@ Discord 側の制限で、1サーバーにつき `SCHEDULED` / `ACTIVE` のイ�
 ```
 python -m pso2boost check      # 新着・開始・終了を確認して通知
 python -m pso2boost list       # 現在のブースト予定を表示（--json 可）
+python -m pso2boost channels   # Bot の参加サーバーとチャンネルIDを表示
 python -m pso2boost preview URL  # 告知記事の解析結果を表示（デバッグ用）
 python -m pso2boost test-notify  # Webhook の疎通確認
 ```
@@ -214,8 +234,9 @@ Event ID: 79c8704046d6
 | --- | --- |
 | `DISCORD_WEBHOOK_URL` | Webhook で投稿する場合の URL |
 | `DISCORD_BOT_TOKEN` | Discord イベントを作る場合の Bot トークン |
-| `DISCORD_GUILD_ID` | Discord イベントを作る場合のサーバー ID |
+| `DISCORD_GUILD_ID` | Discord イベントを作る場合のサーバー ID（1サーバーなら省略可） |
 | `DISCORD_CHANNEL_ID` | Webhook を使わず Bot で投稿する場合のチャンネル ID |
+| `DISCORD_CHANNEL_NAME` | チャンネル名で指定する場合（ID より簡単） |
 | `DISCORD_MENTION_ROLE_ID` | 新着通知でメンションするロール ID（任意） |
 | `DISCORD_WEBHOOK_USERNAME` | 投稿名（任意。既定は Webhook の名前） |
 | `DISCORD_WEBHOOK_AVATAR_URL` | アイコン画像 URL（任意） |
