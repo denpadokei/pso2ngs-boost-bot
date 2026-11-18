@@ -1,11 +1,12 @@
-"""Discord の HTTP Interactions（PING / ``/setup``）。
+"""Discord の HTTP Interactions（PING / ``/setup``、deferReply 方式）。
 
 Gateway への常駐接続は不要。Discord が Function App の URL へ POST する。
 
 - 毎回 Ed25519 署名を検証する（失敗は 401）
 - PING（type 1）には ``{"type": 1}``
-- ``/setup``: MANAGE_GUILD を確認し、チャンネルを検証して Table へ保存
-  - 3秒以内に ephemeral 応答を返す（同期的に1回 API を呼ぶだけ）
+- ``/setup``: ローカルで済む確認だけして **type 5（deferReply）で即時 ACK**。
+  ネットワーク呼び出しを含む処理（チャンネル検証・Table 保存）は
+  バックグラウンドで続け、結果を webhook の @original へ PATCH で届ける。
 
 このモジュールは azure.functions に依存しない（単体テスト可能）。
 HTTP の入口は function_app.py が担う。
@@ -15,7 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Mapping
+import threading
+from typing import Any, Callable, Mapping
 
 import requests
 
@@ -107,6 +109,11 @@ def ephemeral(content: str) -> dict:
     return {"type": 4, "data": {"flags": EPHEMERAL_FLAG, "content": content}}
 
 
+def deferred_ephemeral() -> dict:
+    """deferReply（type 5）。本人にだけ見える「お待ちください」状態を作る。"""
+    return {"type": 5, "data": {"flags": EPHEMERAL_FLAG}}
+
+
 def _permission_names(bits: int) -> list[str]:
     names = [
         (1 << 44, "イベントの作成"),
@@ -127,6 +134,8 @@ def handle_interaction(
     config: CloudConfig,
     store: TableStore | None = None,
     discord: DiscordRest | None = None,
+    followup_runner: Callable[[Callable[[], None]], None] | None = None,
+    patch_session=None,
 ) -> tuple[int, dict]:
     """署名検証してインタラクションを処理する。
 
@@ -151,7 +160,12 @@ def handle_interaction(
         return 200, {"type": 1}
     if kind == INTERACTION_APPLICATION_COMMAND:
         return handle_application_command(
-            payload, config=config, store=store, discord=discord
+            payload,
+            config=config,
+            store=store,
+            discord=discord,
+            followup_runner=followup_runner,
+            patch_session=patch_session,
         )
 
     # 対象外のインタラクション（設計: スラッシュコマンド以外はやらない）
@@ -165,6 +179,8 @@ def handle_application_command(
     config: CloudConfig,
     store: TableStore | None = None,
     discord: DiscordRest | None = None,
+    followup_runner: Callable[[Callable[[], None]], None] | None = None,
+    patch_session=None,
 ) -> tuple[int, dict]:
     data = payload.get("data") or {}
     if data.get("name") != "setup":
@@ -178,6 +194,7 @@ def handle_application_command(
     except ValueError:
         member_permissions = 0
 
+    # ここまでの確認はローカルで済むので、即時応答（type 4）を返せる
     if not guild_id or not (member_permissions & MANAGE_GUILD):
         return 200, ephemeral(
             "❌ このコマンドには「サーバーを管理」（MANAGE_GUILD）権限が必要です。"
@@ -191,19 +208,73 @@ def handle_application_command(
     if not channel_value:
         return 200, ephemeral("⚠️ 通知先のチャンネルを指定してください。")
 
+    # ここから先はネットワーク呼び出しを含むため、先に ACK（type 5）を返し、
+    # 処理はバックグラウンドで続けて結果を PATCH で届ける（deferReply）。
+    followup: dict = {
+        "payload": payload,
+        "config": config,
+        "store": store,
+        "discord": discord,
+        "channel_value": channel_value,
+        "guild_id": guild_id,
+        "session": patch_session,
+    }
+    runner = followup_runner or _spawn_thread
+    runner(lambda: _process_setup(**followup))
+    return 200, deferred_ephemeral()
+
+
+def _spawn_thread(work: Callable[[], None]) -> None:
+    """ACK を返した後に処理を続けるためのワーカースレッド。"""
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _process_setup(
+    *,
+    payload: dict,
+    config: CloudConfig,
+    store: TableStore | None,
+    discord: DiscordRest | None,
+    channel_value: str,
+    guild_id: str,
+    session=None,
+) -> None:
+    """ACK 後に実行する本体。結果を webhook の @original へ PATCH する。"""
     discord = discord or DiscordRest(config.bot_token)
+    store = store or TableStore(config.storage_connection)
+
     try:
         channel = discord.get_channel(channel_value)
+        if str(channel.get("guild_id") or "") != guild_id:
+            content = "⚠️ このサーバー内のチャンネルを指定してください。"
+        elif channel.get("type") not in TEXT_CHANNEL_TYPES:
+            content = (
+                "⚠️ 通知先にはテキストチャンネル"
+                "（またはアナウンスチャンネル）を指定してください。"
+            )
+        else:
+            content = _save_guild(
+                payload, store=store, channel=channel, guild_id=guild_id
+            )
     except DiscordRestError as exc:
-        return 200, ephemeral(f"⚠️ チャンネルを確認できませんでした: {exc}")
+        content = f"⚠️ チャンネルを確認できませんでした: {exc}"
+    except Exception as exc:  # 保存失敗なども画面に届ける
+        log.exception("guilds テーブルの更新に失敗")
+        content = f"⚠️ 設定を保存できませんでした: {exc}"
 
-    if str(channel.get("guild_id") or "") != guild_id:
-        return 200, ephemeral("⚠️ このサーバー内のチャンネルを指定してください。")
-    if channel.get("type") not in TEXT_CHANNEL_TYPES:
-        return 200, ephemeral(
-            "⚠️ 通知先にはテキストチャンネル（またはアナウンスチャンネル）を指定してください。"
+    try:
+        _patch_original(
+            str(payload.get("application_id") or ""),
+            str(payload.get("token") or ""),
+            content,
+            session=session,
         )
+    except Exception:
+        log.exception("followup PATCH に失敗")
 
+
+def _save_guild(payload: dict, *, store: TableStore, channel: dict, guild_id: str) -> str:
+    """guilds テーブルへ保存し、ユーザーへ見せるメッセージを返す。"""
     # Bot 自身の権限はインタラクションの app_permissions から判定する
     try:
         app_permissions = int(str(payload.get("app_permissions") or "0"))
@@ -212,28 +283,20 @@ def handle_application_command(
     missing = RECOMMENDED_PERMISSIONS & ~app_permissions
     permissions_ok = missing == 0
 
-    store = store or TableStore(config.storage_connection)
     now = now_jst()
-    try:
-        # 初回の Timer 実行より前に /setup が来てもテーブルを自動作成する
-        store.ensure_tables()
-        existing = {
-            guild.guild_id: guild for guild in store.list_guilds()
-        }.get(guild_id)
-        guild = GuildConfig(
-            guild_id=guild_id,
-            channel_id=str(channel.get("id") or channel_value),
-            mention_role_id=existing.mention_role_id if existing else "",
-            enabled=True,
-            permissions_ok=permissions_ok,
-            added_at=existing.added_at if existing else now.isoformat(),
-            last_run_at=existing.last_run_at if existing else "",
-            last_error="",
-        )
-        store.upsert_guild(guild)
-    except Exception as exc:  # どんな失敗でも 3 秒以内に ephemeral 応答を返す
-        log.exception("guilds テーブルの更新に失敗")
-        return 200, ephemeral(f"⚠️ 設定を保存できませんでした: {exc}")
+    store.ensure_tables()
+    existing = {guild.guild_id: guild for guild in store.list_guilds()}.get(guild_id)
+    guild = GuildConfig(
+        guild_id=guild_id,
+        channel_id=str(channel.get("id")),
+        mention_role_id=existing.mention_role_id if existing else "",
+        enabled=True,
+        permissions_ok=permissions_ok,
+        added_at=existing.added_at if existing else now.isoformat(),
+        last_run_at=existing.last_run_at if existing else "",
+        last_error="",
+    )
+    store.upsert_guild(guild)
     log.info("サーバー %s の通知先を設定: チャンネル %s", guild_id, guild.channel_id)
 
     message = (
@@ -243,4 +306,23 @@ def handle_application_command(
     if not permissions_ok:
         names = "、".join(_permission_names(missing))
         message += f"\n⚠️ Bot に権限が足りません: {names}（招待し直すと直ります）"
-    return 200, ephemeral(message)
+    return message
+
+
+def _patch_original(
+    application_id: str, interaction_token: str, content: str, session=None
+) -> None:
+    """deferReply の後追い応答。@original を PATCH して結果を表示する。"""
+    if not application_id or not interaction_token or not content:
+        return
+    url = (
+        f"{API_BASE}/webhooks/{application_id}/{interaction_token}"
+        "/messages/@original"
+    )
+    http = session or requests
+    response = http.patch(url, json={"content": content, "flags": EPHEMERAL_FLAG}, timeout=10)
+    if response.status_code >= 400:
+        raise DiscordRestError(
+            f"HTTP {response.status_code}: {response.text[:200]}",
+            status_code=response.status_code,
+        )

@@ -1,6 +1,9 @@
 """Azure Functions の入口（Python v2 プログラミングモデル）。
 
 ロジックは cloud/ と pso2boost/ に置き、ここは薄く保つ。
+
+注意: defer-try ブランチでは keep-alive を意図的に外している。
+コールドスタート条件下での deferReply の挙動を実測するため。
 """
 
 from __future__ import annotations
@@ -8,44 +11,11 @@ from __future__ import annotations
 import json
 
 import azure.functions as func
-import requests
 
 from cloud import config as cloud_config
 from cloud import interactions, runner
 
 app = func.FunctionApp()
-
-
-@app.timer_trigger(
-    arg_name="timer",
-    schedule="0 * * * * *",  # 毎分（http インスタンスの生存期間に合わせる）
-    run_on_startup=False,
-    use_monitor=True,
-)
-def keep_alive(timer: func.TimerRequest) -> None:
-    """HTTP 関数のインスタンスを温存して /setup を3秒以内に応答させる。
-
-    Flex 従量課金はアイドルでスケールゼロになり、インスタンスの再確保
-    （リクエスト到着前にかかる待ち時間で、Azure のログには現れない）が
-    Discord の応答期限（3秒）を超えることがある。実測ではウォーム時の
-    往復は 0.1〜0.3秒、インスタンス生存は分単位だったため、毎分 self-ping
-    して http 関数グループを温存する。
-    """
-    import os
-
-    hostname = os.environ.get("WEBSITE_HOSTNAME", "")
-    if not hostname:
-        return
-    # /api/interactions への空 POST は署名検証で即 401 になるが、
-    # interactions 関数のコードパス（nacl の import を含む）を直接温める。
-    for path, method in (("/api/health", "get"), ("/api/interactions", "post")):
-        try:
-            if method == "get":
-                requests.get(f"https://{hostname}{path}", timeout=10)
-            else:
-                requests.post(f"https://{hostname}{path}", data=b"", timeout=10)
-        except requests.RequestException:
-            pass  # 失敗しても次のタイマーで再試行するだけなので無視
 
 
 @app.timer_trigger(
