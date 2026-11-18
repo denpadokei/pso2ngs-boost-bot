@@ -46,7 +46,9 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）
+      # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）。
+      # App Service Plan の読み取りは Website Contributor の権限外なので、
+      # サイト自身の properties.sku（FlexConsumption / Dynamic）で判別する。
       # - Flex Consumption: remote-build（Oryx）。scm-do-build 系は使わない
       # - 従来の Consumption: scm-do-build-during-deployment + enable-oryx-build
       - name: Detect hosting plan
@@ -54,14 +56,13 @@ jobs:
         run: |
           set -euo pipefail
           app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
-          plan_id=$(az functionapp list --query "[?name=='${app}'].appServicePlanId | [0]" -o tsv)
-          if [ -z "$plan_id" ] || [ "$plan_id" = "None" ]; then
+          sku=$(az functionapp list --query "[?name=='${app}'].properties.sku | [0]" -o tsv)
+          if [ -z "$sku" ] || [ "$sku" = "None" ]; then
             echo "関数アプリ '${app}' が見つかりません" >&2
             exit 1
           fi
-          tier=$(az appservice plan show --ids "$plan_id" --query "sku.tier" -o tsv)
-          echo "plan tier: ${tier}"
-          if [ "$tier" = "FlexConsumption" ]; then
+          echo "site sku: ${sku}"
+          if [ "${sku,,}" = "flexconsumption" ]; then
             echo "flex=true" >> "$GITHUB_OUTPUT"
           else
             echo "flex=false" >> "$GITHUB_OUTPUT"
