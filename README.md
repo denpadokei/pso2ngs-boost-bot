@@ -276,6 +276,105 @@ python -m pytest -q
 
 `tests/fixtures/` に、公式ページから解析に必要な要素だけを抜き出した HTML / XML を置いてあり、
 ネットワークなしで解析を検証できます（詳細は `tests/fixtures/README.md`）。
+共有Bot（`cloud/`）のテストまで全部通すには、PyNaCl が別途必要です。
+
+```bash
+python -m pip install -r cloud/requirements.txt
+```
+
+## 共有Bot（1つの Bot を複数サーバーへ）
+
+OAuth も Web UI も Gateway 常駐もなしで、1つの Bot を複数サーバーへ配る構成です。
+設計の詳細は [docs/shared-bot.md](docs/shared-bot.md) を参照してください。
+
+- 各サーバーの管理者が `/setup #チャンネル` を実行して通知先を登録
+- Azure Functions の Timer が毎週水曜 13:00 (JST) に全サーバーへ一括同期
+  （通知・スケジュールイベント作成。pso2.jp への取得は週1回だけ）
+- 状態は Azure Table Storage（サーバーごとにパーティション）
+- セルフホスト配布（この README の前半）は今までどおり単独で使えます
+
+### 1. Bot を作って招待する
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリを作成
+2. 「General Information」の **Application ID** を控える
+3. 「Bot」でトークンを、**Public Key** もコピー（Interactions の検証に使う）
+4. 次の URL で各サーバーへ招待（`applications.commands` が必要な点がセルフホストと違う）
+
+```
+https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot%20applications.commands&permissions=17600775982080
+```
+
+権限は「イベントの作成 / イベントの管理 / メッセージを送信 / チャンネルを見る」
+（合計 `17600775982080`）です。
+
+### 2. スラッシュコマンドを登録する
+
+ローカルから1回だけ実行します（グローバル登録は伝播に最大1時間）。
+
+```bash
+python -m pip install -r requirements.txt
+DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... python -m cloud.commands
+# 開発中は DISCORD_DEV_GUILD_ID=... も付けると即時反映される
+```
+
+### 3. Azure 側を用意する（1回だけ）
+
+Function App（Consumption / Linux / Python 3.12）と Storage Account を作成し、
+Function App の **アプリ設定** に以下を登録します。
+
+| アプリ設定 | 値 |
+| --- | --- |
+| `DISCORD_BOT_TOKEN` | Bot トークン |
+| `DISCORD_PUBLIC_KEY` | アプリの Public Key |
+| `AZURE_STORAGE_CONNECTION_STRING` | Storage Account の接続文字列（未設定なら `AzureWebJobsStorage` を使う） |
+
+次に Discord Developer Portal の「General Information」で
+**Interactions Endpoint URL** を次に設定します。
+
+```
+https://<function-app-name>.azurewebsites.net/api/interactions
+```
+
+Azure リソースの作成はドキュメントの手順に沿って手動で行ってください
+（このリポジトリには IaC を含みません）。
+
+### 4. GitHub Actions で自動デプロイ
+
+`main` へ push すると OIDC 認証でデプロイされます（`.github/workflows/deploy-cloud.yml`）。
+リポジトリの **Settings → Secrets and variables → Actions → Variables** に登録してください
+（Secrets ではありません）。
+
+| 変数 | 値 |
+| --- | --- |
+| `AZURE_CLIENT_ID` | ユーザー割り当てマネージド ID のクライアント ID |
+| `AZURE_TENANT_ID` | テナント ID |
+| `AZURE_SUBSCRIPTION_ID` | サブスクリプション ID |
+| `AZURE_FUNCTIONAPP_NAME` | Function App の名前（**未設定ならデプロイはスキップ**） |
+
+マネージド ID への **Website Contributor** ロール付与とフェデレーション資格情報の
+作成手順は [docs/shared-bot.md](docs/shared-bot.md) §10 を参照してください。
+
+デプロイ後の確認:
+
+```bash
+curl https://<function-app-name>.azurewebsites.net/api/health
+```
+
+### 5. サーバー管理者が `/setup` を実行
+
+サーバー設定の「サーバーを管理」権限を持つメンバーが実行します。
+
+```
+/setup channel:#お知らせ
+```
+
+- 3秒以内に「✅ 通知先を #お知らせ に設定しました」と本人にだけ見える応答
+- テキスト / アナウンスチャンネル以外は拒否、他サーバーのチャンネルも拒否
+- Bot の権限が足りなければ警告を添えて保存（招待し直せば直る）
+- 次の水曜 13:00 (JST) から通知とイベント作成が始まる
+
+Bot をサーバーから抜くと、次回のバッチで自動的に停止（`enabled=false`）になります。
+`/setup` をやり直せば再開できます。
 
 ## 注意事項
 
