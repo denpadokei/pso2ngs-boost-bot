@@ -14,6 +14,8 @@ DisCal のような「イベント告知 + カレンダー運用」を、この�
 > GitHub の「Use this template」→「Create a new repository」で自分のリポジトリを作り、
 > Secrets を設定すれば、そのまま自分のサーバー用に動きます。
 > 各自が自分の Bot / Webhook を使う前提なので、OAuth アプリの実装や共有サーバーは不要です。
+> `data/state.json` は動作状態です。テンプレートから作った場合は削除して構いません
+> （初回に現在の予定が通知され、Discord 側にイベントが無ければ自動で作り直します）。
 
 ## 仕組み
 

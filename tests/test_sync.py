@@ -148,3 +148,28 @@ def test_deletes_event_that_left_the_schedule(tmp_path: Path):
     assert result.deleted == 1
     assert api.deleted == ["ev9"]
     assert state.discord_event("old") is None
+
+
+class NotFoundApi(FakeApi):
+    def update(self, event_id, **kwargs) -> None:
+        from pso2boost.discord_events import DiscordApiError
+
+        raise DiscordApiError("HTTP 404: Unknown Guild Scheduled Event")
+
+    def delete(self, event_id: str) -> None:
+        from pso2boost.discord_events import DiscordApiError
+
+        raise DiscordApiError("HTTP 404: Unknown Guild Scheduled Event")
+
+
+def test_recreates_event_when_discord_returns_404(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    state.set_discord_event(event.key, {"id": "stale", "signature": "old"})
+    api = NotFoundApi()
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 1
+    assert api.created
+    assert state.discord_event(event.key)["id"] == "ev1"

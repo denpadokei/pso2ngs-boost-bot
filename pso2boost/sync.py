@@ -159,8 +159,30 @@ def sync_events(
         try:
             api.update(entry["id"], **payload)
         except DiscordApiError as exc:
-            log.error("イベント更新に失敗 (%s): %s", event.label, exc)
-            result.errors += 1
+            if "HTTP 404" not in str(exc):
+                log.error("イベント更新に失敗 (%s): %s", event.label, exc)
+                result.errors += 1
+                continue
+            # 別サーバーの状態を引き継いだ場合など、Discord 側に存在しない
+            log.warning("Discord 側にイベントが無いため作り直します: %s", event.label)
+            state.remove_discord_event(event.key)
+            try:
+                new_id = api.create(**payload)
+            except DiscordApiError as create_exc:
+                log.error("イベント作成に失敗 (%s): %s", event.label, create_exc)
+                result.errors += 1
+                continue
+            state.set_discord_event(
+                event.key,
+                {
+                    "id": new_id,
+                    "signature": signature,
+                    "name": event.label,
+                    "end": payload["end"].isoformat(),
+                },
+            )
+            result.created += 1
+            result.links[event.key] = api.event_url(new_id)
             continue
         state.set_discord_event(
             event.key,
@@ -206,6 +228,9 @@ def _delete_stale(
         try:
             api.delete(entry["id"])
         except DiscordApiError as exc:
+            if "HTTP 404" in str(exc):
+                state.remove_discord_event(key)
+                continue
             log.error("イベント削除に失敗 (%s): %s", entry.get("name") or key, exc)
             result.errors += 1
             continue
