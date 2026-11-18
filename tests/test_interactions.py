@@ -42,6 +42,11 @@ def make_store() -> TableStore:
     return store
 
 
+def make_bare_store() -> TableStore:
+    """テーブル未作成の FakeTableService をそのまま使う（ensure しない）。"""
+    return TableStore("unused", service=FakeTableService())
+
+
 class FakeDiscord:
     def __init__(self, channels: dict[str, dict]) -> None:
         self.channels = channels
@@ -289,6 +294,43 @@ def test_unknown_command_returns_400():
 def test_ephemeral_shape():
     body = ephemeral("こんにちは")
     assert body == {"type": 4, "data": {"flags": 64, "content": "こんにちは"}}
+
+
+def test_setup_creates_missing_tables():
+    """初回 Timer 実行前（テーブル未作成）でも /setup が成功する。"""
+    signing, public_hex = make_signing()
+    store = make_bare_store()  # ensure していない＝テーブルがまだ無い状態
+
+    status, body = signed_call(
+        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS)
+    )
+
+    assert status == 200
+    assert "✅" in body["data"]["content"]
+    guilds = {g.guild_id: g for g in store.list_guilds()}
+    assert guilds["111"].channel_id == "555"
+
+
+def test_setup_replies_ephemeral_on_storage_failure():
+    """テーブル障害でも 3 秒以内に ephemeral 応答を返す（タイムアウトさせない）。"""
+    from fakes import FakeTableService
+
+    class BrokenTableService(FakeTableService):
+        def upsert_entity(self, name, entity):
+            raise RuntimeError("table unavailable")
+
+    signing, public_hex = make_signing()
+    store = TableStore("unused", service=BrokenTableService())
+    store.ensure_tables()
+
+    status, body = signed_call(
+        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS)
+    )
+
+    assert status == 200
+    assert body["type"] == 4
+    assert body["data"]["flags"] == 64
+    assert "設定を保存できませんでした" in body["data"]["content"]
 
 
 # ------------------------------------------------------------ コマンド登録

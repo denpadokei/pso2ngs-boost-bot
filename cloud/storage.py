@@ -169,6 +169,53 @@ def rows_to_state(rows: list[dict], now: datetime) -> State:
 
 
 # --------------------------------------------------------------------------
+# azure SDK のクライアントを TableStore の IF へ合わせるアダプタ
+# --------------------------------------------------------------------------
+class _TableServiceAdapter:
+    """azure.data.tables.TableServiceClient を TableStore が使う
+    インターフェース（table_exists / create_table / list_entities /
+    upsert_entity / delete_entity）へ合わせる薄いラッパー。
+
+    SDK の TableServiceClient はテーブル単位の操作を持たず、
+    get_table_client() で取得した TableClient を介する必要がある。
+    （実機で AttributeError になったため、この違いをここに集約する。
+    テストはこの IF を持つ Fake を使うので、SDK 側の表面は
+    test_storage.py の契約テストで保証する。）
+    """
+
+    def __init__(self, client) -> None:
+        self._client = client  # azure.data.tables.TableServiceClient
+
+    def table_exists(self, name: str) -> bool:
+        for table in self._client.list_tables():
+            if table.name == name:
+                return True
+        return False
+
+    def create_table(self, name: str) -> None:
+        from azure.core.exceptions import ResourceExistsError
+
+        try:
+            self._client.create_table(name)
+        except ResourceExistsError:  # ensure の競合は無視してよい
+            pass
+
+    def list_entities(self, name: str, query: str | None = None) -> list[dict]:
+        table = self._client.get_table_client(name)
+        # query_entities の第1引数は OData フィルタ（None なら全件）
+        return [dict(entity) for entity in table.query_entities(query)]
+
+    def upsert_entity(self, name: str, entity: dict) -> None:
+        # 既定の UpdateMode.MERGE なので、部分更新でも他の列は消えない
+        self._client.get_table_client(name).upsert_entity(entity)
+
+    def delete_entity(self, name: str, partition_key: str, row_key: str) -> None:
+        self._client.get_table_client(name).delete_entity(
+            partition_key=partition_key, row_key=row_key
+        )
+
+
+# --------------------------------------------------------------------------
 # Table へのアクセス
 # --------------------------------------------------------------------------
 class TableStore:
@@ -190,7 +237,9 @@ class TableStore:
         if service is None:
             from azure.data.tables import TableServiceClient
 
-            service = TableServiceClient.from_connection_string(connection_string)
+            service = _TableServiceAdapter(
+                TableServiceClient.from_connection_string(connection_string)
+            )
         self._service = service
 
     # ------------------------------------------------------------------ init

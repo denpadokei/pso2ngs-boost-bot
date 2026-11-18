@@ -182,6 +182,13 @@ Azure への配置も GitHub Actions で行う。認証は **OIDC**（公開プ�
 1. ユーザー割り当てマネージド ID を作成
 2. その ID に、関数アプリスコープで **Website Contributor** を付与
 3. フェデレーション資格情報を作成（GitHub / 組織 / リポジトリ / ブランチ `main`）
+   - **注意（2026-11 実測）**: GitHub Actions の OIDC トークンの `sub` は
+     `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/main` 形式で提示される。
+     ポータルの GitHub シナリオが雛形にする `repo:<owner>/<repo>:ref:refs/heads/main`
+     （ID なし）では **AADSTS700213（No matching federated identity record）** になる。
+     `az identity federated-credential create` の `--subject` に ID 入りの形式
+     （例: `repo:denpadokei@55026301/pso2ngs-boost-bot@1462151752:ref:refs/heads/main`）
+     を指定して作成すること。owner_id / repo_id はリネームで変わらないため安定。
 4. リポジトリ変数（Secrets ではなく Variables）に登録
 
 | 変数 | 値 |
@@ -249,6 +256,9 @@ jobs:
           app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
           package: build
 ```
+
+> ※上のスニペットは設計時のもの。実装した `.github/workflows/deploy-cloud.yml` は
+> **リモートビルド方式**（プラン自動判別つき）に変更している。詳細は §16。
 
 ### 依存関係の入れ方
 
@@ -347,3 +357,18 @@ docs/shared-bot.md       # この設計書
   429/5xx/ネットワークエラーでは無効化しない。
 - **コマンド登録**: `python -m cloud.commands`（`DISCORD_BOT_TOKEN` /
   `DISCORD_APPLICATION_ID` 必須、`DISCORD_DEV_GUILD_ID` でギルドコマンド化）。
+- **デプロイ方式**: 依存の同梱（`pip install --target .python_packages`）ではなく
+  **リモートビルド（Oryx）** を使う。Flex Consumption の Python は公式に
+  「remote build を使え」とされており、従来の Consumption でもリモートビルドは
+  推奨パスのため共通化した。zip 直下にはセルフホスト用と Functions 用を
+  合わせた `requirements.txt` を置く。プラン種別（FlexConsumption / 従来）は
+  ワークフロー内で `az appservice plan show` の sku.tier から自動判別し、
+  `Azure/functions-action` に渡すビルドフラグを切り替える
+  （Flex: `remote-build`、従来: `scm-do-build-during-deployment` ＋ `enable-oryx-build`）。
+- **インスタンスサイズ**: Flex Consumption で選択する場合は 2048MB（既定）で十分。
+  このワークロード（週1回・数分のバッチ + 低頻度の `/setup`）の実使用メモリは
+  200MB 程度に収まる。
+- **フェデレーション資格情報の Subject**: GitHub の OIDC トークンは
+  `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>` 形式の `sub` を
+  提示する（2026-11 実測。ID なしの旧形式では AADSTS700213 になる）。
+  §10 の注意書きを参照。

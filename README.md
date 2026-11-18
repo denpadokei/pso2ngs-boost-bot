@@ -319,8 +319,15 @@ DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... python -m cloud.commands
 
 ### 3. Azure 側を用意する（1回だけ）
 
-Function App（Consumption / Linux / Python 3.12）と Storage Account を作成し、
-Function App の **アプリ設定** に以下を登録します。
+Function App（**Consumption 系 / Linux / Python 3.12**）と Storage Account を作成します。
+プランはどちらでも動きます（デプロイ時のワークフローが自動で判別します）:
+
+- **Flex Consumption**（現在のポータルの既定・推奨）— インスタンスサイズは **2048MB** で十分です
+  （このBotの実行は週1回・数分のバッチと `/setup` の応答だけです。512/2048/4096MB の3択で、
+  Microsoft もほとんどのシナリオで 2048MB を既定に推奨しています）
+- **従来の Consumption** — インスタンスサイズの選択はありません（固定）
+
+作成後、Function App の **アプリ設定** に以下を登録します。
 
 | アプリ設定 | 値 |
 | --- | --- |
