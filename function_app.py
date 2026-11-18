@@ -10,7 +10,7 @@ import json
 import azure.functions as func
 
 from cloud import config as cloud_config
-from cloud import runner
+from cloud import interactions, runner
 
 app = func.FunctionApp()
 
@@ -39,4 +39,21 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
+    )
+
+
+@app.function_name(name="interactions")
+@app.route(route="interactions", auth_level=func.AuthLevel.ANONYMOUS)
+def discord_interactions(req: func.HttpRequest) -> func.HttpResponse:
+    """Discord の HTTP Interactions（PING / /setup）。"""
+    config = cloud_config.CloudConfig.from_env()
+    status, body = interactions.handle_interaction(
+        body=req.get_body(),
+        headers=req.headers,
+        config=config,
+    )
+    return func.HttpResponse(
+        json.dumps(body, ensure_ascii=False),
+        status_code=status,
+        mimetype="application/json",
     )
