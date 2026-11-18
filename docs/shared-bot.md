@@ -250,6 +250,9 @@ jobs:
           package: build
 ```
 
+> ※上のスニペットは設計時のもの。実装した `.github/workflows/deploy-cloud.yml` は
+> **リモートビルド方式**（プラン自動判別つき）に変更している。詳細は §16。
+
 ### 依存関係の入れ方
 
 OIDC + パッケージデプロイでは remote build に頼らず、**依存を同梱**する。
@@ -347,3 +350,14 @@ docs/shared-bot.md       # この設計書
   429/5xx/ネットワークエラーでは無効化しない。
 - **コマンド登録**: `python -m cloud.commands`（`DISCORD_BOT_TOKEN` /
   `DISCORD_APPLICATION_ID` 必須、`DISCORD_DEV_GUILD_ID` でギルドコマンド化）。
+- **デプロイ方式**: 依存の同梱（`pip install --target .python_packages`）ではなく
+  **リモートビルド（Oryx）** を使う。Flex Consumption の Python は公式に
+  「remote build を使え」とされており、従来の Consumption でもリモートビルドは
+  推奨パスのため共通化した。zip 直下にはセルフホスト用と Functions 用を
+  合わせた `requirements.txt` を置く。プラン種別（FlexConsumption / 従来）は
+  ワークフロー内で `az appservice plan show` の sku.tier から自動判別し、
+  `Azure/functions-action` に渡すビルドフラグを切り替える
+  （Flex: `remote-build`、従来: `scm-do-build-during-deployment` ＋ `enable-oryx-build`）。
+- **インスタンスサイズ**: Flex Consumption で選択する場合は 2048MB（既定）で十分。
+  このワークロード（週1回・数分のバッチ + 低頻度の `/setup`）の実使用メモリは
+  200MB 程度に収まる。

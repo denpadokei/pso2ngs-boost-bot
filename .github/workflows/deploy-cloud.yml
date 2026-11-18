@@ -29,17 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
+      # 依存はデプロイ時にリモートビルド（Oryx）で入れるので、
+      # ランナー上での pip install は不要
       - name: Build package
         run: |
           mkdir -p build
           cp function_app.py host.json build/
           cp -r pso2boost cloud build/
-          python -m pip install -r cloud/requirements.txt \
-            --target build/.python_packages/lib/site-packages
+          # リモートビルドは zip 直下の requirements.txt を見るため、
+          # セルフホスト用 + Functions 用を合わせて1枚にする
+          cat requirements.txt cloud/requirements.txt > build/requirements.txt
 
       - uses: azure/login@v3
         with:
@@ -47,7 +46,31 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）
+      # - Flex Consumption: remote-build（Oryx）。scm-do-build 系は使わない
+      # - 従来の Consumption: scm-do-build-during-deployment + enable-oryx-build
+      - name: Detect hosting plan
+        id: plan
+        run: |
+          set -euo pipefail
+          app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
+          plan_id=$(az functionapp list --query "[?name=='${app}'].appServicePlanId | [0]" -o tsv)
+          if [ -z "$plan_id" ] || [ "$plan_id" = "None" ]; then
+            echo "関数アプリ '${app}' が見つかりません" >&2
+            exit 1
+          fi
+          tier=$(az appservice plan show --ids "$plan_id" --query "sku.tier" -o tsv)
+          echo "plan tier: ${tier}"
+          if [ "$tier" = "FlexConsumption" ]; then
+            echo "flex=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "flex=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: Azure/functions-action@v1
         with:
           app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
           package: build
+          remote-build: ${{ steps.plan.outputs.flex == 'true' }}
+          scm-do-build-during-deployment: ${{ steps.plan.outputs.flex != 'true' }}
+          enable-oryx-build: ${{ steps.plan.outputs.flex != 'true' }}
