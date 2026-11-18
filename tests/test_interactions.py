@@ -1,15 +1,14 @@
-"""cloud.interactions（署名検証・PING・/setup）のテスト。"""
+"""cloud.interactions（署名検証・PING・/setup deferReply 版）のテスト。"""
 
 import json
 from datetime import datetime
 
 from nacl.signing import SigningKey
 
-from cloud.commands import SETUP_COMMAND, commands_url, register_commands
 from cloud.config import CloudConfig
 from cloud.interactions import (
     MANAGE_GUILD,
-    DiscordRestError,
+    deferred_ephemeral,
     ephemeral,
     handle_interaction,
     verify_signature,
@@ -42,9 +41,23 @@ def make_store() -> TableStore:
     return store
 
 
-def make_bare_store() -> TableStore:
-    """テーブル未作成の FakeTableService をそのまま使う（ensure しない）。"""
-    return TableStore("unused", service=FakeTableService())
+class FakePatchSession:
+    """followup の PATCH を記録する Fake。"""
+
+    def __init__(self, status: int = 200) -> None:
+        self.patches: list[tuple[str, dict]] = []
+        self.status = status
+
+    def patch(self, url, json=None, timeout=None):
+        self.patches.append((url, json))
+        class R:
+            status_code = self.status
+            text = ""
+        return R()
+
+    @property
+    def last_content(self) -> str:
+        return self.patches[-1][1]["content"] if self.patches else ""
 
 
 class FakeDiscord:
@@ -53,6 +66,8 @@ class FakeDiscord:
 
     def get_channel(self, channel_id: str) -> dict:
         if channel_id not in self.channels:
+            from cloud.interactions import DiscordRestError
+
             raise DiscordRestError(f"HTTP 404: Unknown Channel {channel_id}")
         return dict(self.channels[channel_id])
 
@@ -65,12 +80,11 @@ def signed_call(
     config: CloudConfig | None = None,
     store: TableStore | None = None,
     discord: FakeDiscord | None = None,
-    tamper: bool = False,
+    patch_session: FakePatchSession | None = None,
 ):
+    """署名して送り、followup は同期的に実行する（テスト用）。"""
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     signature = signing_key.sign(TIMESTAMP.encode() + body).signature
-    if tamper:
-        body = body + b" "
     headers = {
         "X-Signature-Ed25519": signature.hex(),
         "X-Signature-Timestamp": TIMESTAMP,
@@ -81,12 +95,16 @@ def signed_call(
         config=config or make_config(verify_hex),
         store=store,
         discord=discord,
+        followup_runner=(lambda fn: fn()) if patch_session is not None else None,
+        patch_session=patch_session,
     )
 
 
 def make_payload(**overrides) -> dict:
     payload = {
         "type": 2,
+        "application_id": "1572407928101806202",
+        "token": "inter-action-token",
         "guild_id": "111",
         "data": {
             "name": "setup",
@@ -143,7 +161,7 @@ def test_ping_returns_type_1():
 
 def test_invalid_signature_returns_401():
     signer, _ = make_signing()
-    _, other_public = make_signing()  # 署名鍵とは別のアプリの公開鍵
+    _, other_public = make_signing()
     status, body = signed_call(
         other_public, signer, make_payload(), store=make_store(), discord=FakeDiscord(CHANNELS)
     )
@@ -158,9 +176,10 @@ def test_missing_public_key_returns_503():
 
 
 # ------------------------------------------------------------------- /setup
-def test_setup_saves_channel_and_replies_ephemeral():
+def test_setup_returns_deferred_ack_and_patches_success():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     status, body = signed_call(
         public_hex,
@@ -168,98 +187,120 @@ def test_setup_saves_channel_and_replies_ephemeral():
         make_payload(),
         store=store,
         discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
+    # 即時応答は type 5（deferReply・ephemeral）
     assert status == 200
-    assert body["type"] == 4
-    assert body["data"]["flags"] == 64  # ephemeral
-    assert "#テスト" in body["data"]["content"]
-    assert "毎週水曜 13:00" in body["data"]["content"]
+    assert body == {"type": 5, "data": {"flags": 64}}
+
+    # followup が @original を PATCH している
+    assert len(patch.patches) == 1
+    url, payload = patch.patches[0]
+    assert url.endswith(
+        "/webhooks/1572407928101806202/inter-action-token/messages/@original"
+    )
+    assert "✅ 通知先を #テスト に設定しました" in patch.last_content
+    assert "毎週水曜 13:00" in patch.last_content
 
     guilds = {g.guild_id: g for g in store.list_guilds()}
     assert guilds["111"].channel_id == "555"
-    assert guilds["111"].enabled is True
     assert guilds["111"].permissions_ok is True
 
 
 def test_setup_accepts_announcement_channel():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     payload = make_payload()
     payload["data"]["options"][0]["value"] = "556"
     status, body = signed_call(
-        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
-    assert status == 200
-    assert "#お知らせ" in body["data"]["content"]
+    assert body["type"] == 5
+    assert "#お知らせ" in patch.last_content
     assert {g.guild_id: g for g in store.list_guilds()}["111"].channel_id == "556"
 
 
-def test_setup_rejects_member_without_manage_guild():
+def test_setup_rejects_member_without_manage_guild_immediately():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     payload = make_payload(member={"permissions": "0"})
     status, body = signed_call(
-        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
+    # 権限なしはローカル判定なので即時 type 4 で拒否
     assert status == 200
+    assert body["type"] == 4
     assert "MANAGE_GUILD" in body["data"]["content"]
+    assert patch.patches == []
     assert store.list_guilds() == []
 
 
-def test_setup_rejects_voice_channel():
+def test_setup_rejects_voice_channel_via_followup():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     payload = make_payload()
     payload["data"]["options"][0]["value"] = "777"
     status, body = signed_call(
-        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
-    assert status == 200
-    assert "テキストチャンネル" in body["data"]["content"]
+    assert body["type"] == 5
+    assert "テキストチャンネル" in patch.last_content
     assert store.list_guilds() == []
 
 
-def test_setup_rejects_channel_of_other_guild():
+def test_setup_rejects_channel_of_other_guild_via_followup():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     payload = make_payload()
     payload["data"]["options"][0]["value"] = "888"
     status, body = signed_call(
-        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
-    assert "サーバー内のチャンネル" in body["data"]["content"]
+    assert "サーバー内のチャンネル" in patch.last_content
     assert store.list_guilds() == []
 
 
-def test_setup_rejects_missing_channel():
+def test_setup_rejects_missing_channel_immediately():
     signing, public_hex = make_signing()
     payload = make_payload(data={"name": "setup", "options": []})
 
     status, body = signed_call(
-        public_hex, signing, payload, store=make_store(), discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=make_store(), discord=FakeDiscord(CHANNELS),
+        patch_session=FakePatchSession(),
     )
+    assert body["type"] == 4
     assert "チャンネルを指定" in body["data"]["content"]
 
 
-def test_setup_warns_but_saves_when_bot_permissions_missing():
+def test_setup_warns_when_bot_permissions_missing():
     signing, public_hex = make_signing()
     store = make_store()
+    patch = FakePatchSession()
 
     payload = make_payload(app_permissions="0")
     status, body = signed_call(
-        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, payload, store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
-    assert "権限が足りません" in body["data"]["content"]
+    assert "権限が足りません" in patch.last_content
     guilds = {g.guild_id: g for g in store.list_guilds()}
     assert guilds["111"].permissions_ok is False
     assert guilds["111"].channel_id == "555"
@@ -270,49 +311,36 @@ def test_setup_updates_existing_guild_row():
     store = make_store()
     discord = FakeDiscord(CHANNELS)
 
-    signed_call(public_hex, signing, make_payload(), store=store, discord=discord)
+    signed_call(
+        public_hex, signing, make_payload(), store=store, discord=discord,
+        patch_session=FakePatchSession(),
+    )
 
     payload = make_payload()
     payload["data"]["options"][0]["value"] = "556"
-    status, body = signed_call(public_hex, signing, payload, store=store, discord=discord)
+    signed_call(
+        public_hex, signing, payload, store=store, discord=discord,
+        patch_session=FakePatchSession(),
+    )
 
     guilds = {g.guild_id: g for g in store.list_guilds()}
     assert len(guilds) == 1
     assert guilds["111"].channel_id == "556"
 
 
-def test_unknown_command_returns_400():
-    signing, public_hex = make_signing()
-    payload = make_payload(data={"name": "status", "options": []})
-
-    status, _ = signed_call(
-        public_hex, signing, payload, store=make_store(), discord=FakeDiscord(CHANNELS)
-    )
-    assert status == 400
-
-
-def test_ephemeral_shape():
-    body = ephemeral("こんにちは")
-    assert body == {"type": 4, "data": {"flags": 64, "content": "こんにちは"}}
-
-
 def test_setup_creates_missing_tables():
-    """初回 Timer 実行前（テーブル未作成）でも /setup が成功する。"""
     signing, public_hex = make_signing()
-    store = make_bare_store()  # ensure していない＝テーブルがまだ無い状態
+    store = TableStore("unused", service=FakeTableService())  # ensure していない
 
     status, body = signed_call(
-        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=FakePatchSession(),
     )
-
     assert status == 200
-    assert "✅" in body["data"]["content"]
-    guilds = {g.guild_id: g for g in store.list_guilds()}
-    assert guilds["111"].channel_id == "555"
+    assert {g.guild_id: g for g in store.list_guilds()}["111"].channel_id == "555"
 
 
-def test_setup_replies_ephemeral_on_storage_failure():
-    """テーブル障害でも 3 秒以内に ephemeral 応答を返す（タイムアウトさせない）。"""
+def test_setup_reports_storage_failure_via_followup():
     from fakes import FakeTableService
 
     class BrokenTableService(FakeTableService):
@@ -322,52 +350,33 @@ def test_setup_replies_ephemeral_on_storage_failure():
     signing, public_hex = make_signing()
     store = TableStore("unused", service=BrokenTableService())
     store.ensure_tables()
+    patch = FakePatchSession()
 
     status, body = signed_call(
-        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS)
+        public_hex, signing, make_payload(), store=store, discord=FakeDiscord(CHANNELS),
+        patch_session=patch,
     )
 
+    # ACK 自体は出る。失敗は followup の PATCH で届く
     assert status == 200
-    assert body["type"] == 4
-    assert body["data"]["flags"] == 64
-    assert "設定を保存できませんでした" in body["data"]["content"]
+    assert body["type"] == 5
+    assert "設定を保存できませんでした" in patch.last_content
 
 
-# ------------------------------------------------------------ コマンド登録
-def test_setup_command_definition():
-    assert SETUP_COMMAND["name"] == "setup"
-    assert SETUP_COMMAND["default_member_permissions"] == str(MANAGE_GUILD)
-    option = SETUP_COMMAND["options"][0]
-    assert option["type"] == 7
-    assert option["required"] is True
-    assert option["channel_types"] == [0, 5]
+def test_unknown_command_returns_400():
+    signing, public_hex = make_signing()
+    payload = make_payload(data={"name": "status", "options": []})
+
+    status, _ = signed_call(
+        public_hex, signing, payload, store=make_store(), discord=FakeDiscord(CHANNELS),
+        patch_session=FakePatchSession(),
+    )
+    assert status == 400
 
 
-def test_commands_url_global_and_guild():
-    assert commands_url("app").endswith("/applications/app/commands")
-    assert commands_url("app", "123").endswith("/applications/app/guilds/123/commands")
-
-
-def test_register_commands_puts_setup():
-    class FakeResponse:
-        status_code = 200
-        text = ""
-
-        def json(self):
-            return [{"id": "cmd1"}]
-
-    session_records = {}
-
-    class FakeSession:
-        headers = {}
-
-        def put(self, url, json=None, timeout=None):
-            session_records["url"] = url
-            session_records["payload"] = json
-            return FakeResponse()
-
-    result = register_commands("token", "app", dev_guild_id="123", session=FakeSession())
-
-    assert result == [{"id": "cmd1"}]
-    assert session_records["url"].endswith("/applications/app/guilds/123/commands")
-    assert session_records["payload"] == [SETUP_COMMAND]
+def test_ephemeral_and_deferred_shape():
+    assert ephemeral("こんにちは") == {
+        "type": 4,
+        "data": {"flags": 64, "content": "こんにちは"},
+    }
+    assert deferred_ephemeral() == {"type": 5, "data": {"flags": 64}}
