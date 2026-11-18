@@ -1,51 +1,45 @@
 """Azure Functions の入口（Python v2 プログラミングモデル）。
 
 ロジックは cloud/ と pso2boost/ に置き、ここは薄く保つ。
+
+- weekly_sync: 毎週水曜 04:00 UTC（= 13:00 JST）の週次バッチ
+- health: デプロイ確認用
+- setup 系: OAuth 設定フロー（旧 /setup コマンドの代替。
+  ブラウザ経由なので Discord の3秒制約を受けない）
 """
 
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qs
 
 import azure.functions as func
-import requests
 
 from cloud import config as cloud_config
-from cloud import interactions, runner
+from cloud import runner, setup_pages
+from cloud.storage import TableStore
 
 app = func.FunctionApp()
 
 
-@app.timer_trigger(
-    arg_name="timer",
-    schedule="0 * * * * *",  # 毎分（http インスタンスの生存期間に合わせる）
-    run_on_startup=False,
-    use_monitor=True,
-)
-def keep_alive(timer: func.TimerRequest) -> None:
-    """HTTP 関数のインスタンスを温存して /setup を3秒以内に応答させる。
+def _cookies(req: func.HttpRequest) -> dict:
+    raw = req.headers.get("Cookie") or ""
+    result: dict[str, str] = {}
+    for part in raw.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name:
+            result[name] = value
+    return result
 
-    Flex 従量課金はアイドルでスケールゼロになり、インスタンスの再確保
-    （リクエスト到着前にかかる待ち時間で、Azure のログには現れない）が
-    Discord の応答期限（3秒）を超えることがある。実測ではウォーム時の
-    往復は 0.1〜0.3秒、インスタンス生存は分単位だったため、毎分 self-ping
-    して http 関数グループを温存する。
-    """
-    import os
 
-    hostname = os.environ.get("WEBSITE_HOSTNAME", "")
-    if not hostname:
-        return
-    # /api/interactions への空 POST は署名検証で即 401 になるが、
-    # interactions 関数のコードパス（nacl の import を含む）を直接温める。
-    for path, method in (("/api/health", "get"), ("/api/interactions", "post")):
-        try:
-            if method == "get":
-                requests.get(f"https://{hostname}{path}", timeout=10)
-            else:
-                requests.post(f"https://{hostname}{path}", data=b"", timeout=10)
-        except requests.RequestException:
-            pass  # 失敗しても次のタイマーで再試行するだけなので無視
+def _response(page: setup_pages.Page) -> func.HttpResponse:
+    return func.HttpResponse(
+        page.body,
+        status_code=page.status,
+        headers=page.headers,
+        mimetype="text/html" if page.body else None,
+        charset="utf-8" if page.body else None,
+    )
 
 
 @app.timer_trigger(
@@ -68,25 +62,55 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "status": "ok",
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
-        "public_key": bool(config.public_key),
+        "client_secret": bool(config.client_secret),
+        "session_secret": bool(config.session_secret),
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
     )
 
 
-@app.function_name(name="interactions")
-@app.route(route="interactions", auth_level=func.AuthLevel.ANONYMOUS)
-def discord_interactions(req: func.HttpRequest) -> func.HttpResponse:
-    """Discord の HTTP Interactions（PING / /setup）。"""
+@app.function_name(name="setup_start")
+@app.route(route="setup", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_start(req: func.HttpRequest) -> func.HttpResponse:
+    """設定フローの入口。Discord の認可画面へリダイレクトする。"""
+    return _response(setup_pages.start(cloud_config.CloudConfig.from_env()))
+
+
+@app.function_name(name="setup_callback")
+@app.route(route="setup/callback", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_callback(req: func.HttpRequest) -> func.HttpResponse:
+    """認可コードを受け取り、設定できるサーバー一覧を表示する。"""
     config = cloud_config.CloudConfig.from_env()
-    status, body = interactions.handle_interaction(
-        body=req.get_body(),
-        headers=req.headers,
-        config=config,
+    return _response(
+        setup_pages.callback(
+            config, query=dict(req.params), cookies=_cookies(req)
+        )
     )
-    return func.HttpResponse(
-        json.dumps(body, ensure_ascii=False),
-        status_code=status,
-        mimetype="application/json",
+
+
+@app.function_name(name="setup_channels")
+@app.route(route="setup/channels", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_channels(req: func.HttpRequest) -> func.HttpResponse:
+    """選んだサーバーのテキストチャンネル一覧を表示する。"""
+    config = cloud_config.CloudConfig.from_env()
+    return _response(
+        setup_pages.channels(
+            config, query=dict(req.params), cookies=_cookies(req)
+        )
+    )
+
+
+@app.function_name(name="setup_save")
+@app.route(route="setup/save", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_save(req: func.HttpRequest) -> func.HttpResponse:
+    """通知先チャンネルを検証して Table へ保存する。"""
+    config = cloud_config.CloudConfig.from_env()
+    form = {
+        key: values[-1]
+        for key, values in parse_qs(req.get_body().decode("utf-8")).items()
+    }
+    store = TableStore(config.storage_connection)
+    return _response(
+        setup_pages.save(config, store, form=form, cookies=_cookies(req))
     )

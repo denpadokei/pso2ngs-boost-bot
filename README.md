@@ -276,18 +276,17 @@ python -m pytest -q
 
 `tests/fixtures/` に、公式ページから解析に必要な要素だけを抜き出した HTML / XML を置いてあり、
 ネットワークなしで解析を検証できます（詳細は `tests/fixtures/README.md`）。
-共有Bot（`cloud/`）のテストまで全部通すには、PyNaCl が別途必要です。
-
-```bash
-python -m pip install -r cloud/requirements.txt
-```
+Azure への接続は Fake に差し替えてあり、追加のインストールは不要です。
 
 ## 共有Bot（1つの Bot を複数サーバーへ）
 
-OAuth も Web UI も Gateway 常駐もなしで、1つの Bot を複数サーバーへ配る構成です。
+1つの Bot を複数サーバーへ配る構成です。
+サーバーごとの通知先は **OAuth2 認可による設定ページ**で登録します
+（旧方式の `/setup` スラッシュコマンドは、Flex プランの起動待ちが Discord の
+「3秒以内の応答」制約に間に合わないことがあったため廃止しました）。
 設計の詳細は [docs/shared-bot.md](docs/shared-bot.md) を参照してください。
 
-- 各サーバーの管理者が `/setup #チャンネル` を実行して通知先を登録
+- 各サーバーの管理者がブラウザで **設定ページ** を開いて通知先チャンネルを指定
 - Azure Functions の Timer が毎週水曜 13:00 (JST) に全サーバーへ一括同期
   （通知・スケジュールイベント作成。pso2.jp への取得は週1回だけ）
 - 状態は Azure Table Storage（サーバーごとにパーティション）
@@ -297,25 +296,27 @@ OAuth も Web UI も Gateway 常駐もなしで、1つの Bot を複数サーバ
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリを作成
 2. 「General Information」の **Application ID** を控える
-3. 「Bot」でトークンを、**Public Key** もコピー（Interactions の検証に使う）
-4. 次の URL で各サーバーへ招待（`applications.commands` が必要な点がセルフホストと違う）
+3. 「Bot」でトークンをリセットしてコピー
+4. 次の URL で各サーバーへ招待
 
 ```
-https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot%20applications.commands&permissions=17600775982080
+https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=17600775982080
 ```
 
 権限は「イベントの作成 / イベントの管理 / メッセージを送信 / チャンネルを見る」
 （合計 `17600775982080`）です。
 
-### 2. スラッシュコマンドを登録する
+### 2. OAuth2 の設定を登録する（1回だけ）
 
-ローカルから1回だけ実行します（グローバル登録は伝播に最大1時間）。
+Developer Portal の **OAuth2** ページで:
 
-```bash
-python -m pip install -r requirements.txt
-DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... python -m cloud.commands
-# 開発中は DISCORD_DEV_GUILD_ID=... も付けると即時反映される
+1. **Redirects** に次を追加します:
+
 ```
+https://<function-app-name>.azurewebsites.net/api/setup/callback
+```
+
+2. **Client Secret** を作成します（次のステップで Function App へ登録します）
 
 ### 3. Azure 側を用意する（1回だけ）
 
@@ -323,8 +324,7 @@ Function App（**Consumption 系 / Linux / Python 3.12**）と Storage Account �
 プランはどちらでも動きます（デプロイ時のワークフローが自動で判別します）:
 
 - **Flex Consumption**（現在のポータルの既定・推奨）— インスタンスサイズは **2048MB** で十分です
-  （このBotの実行は週1回・数分のバッチと `/setup` の応答だけです。512/2048/4096MB の3択で、
-  Microsoft もほとんどのシナリオで 2048MB を既定に推奨しています）
+  （このBotの実行は週1回・数分のバッチと低頻度の設定ページだけです）
 - **従来の Consumption** — インスタンスサイズの選択はありません（固定）
 
 作成後、Function App の **アプリ設定** に以下を登録します。
@@ -332,15 +332,8 @@ Function App（**Consumption 系 / Linux / Python 3.12**）と Storage Account �
 | アプリ設定 | 値 |
 | --- | --- |
 | `DISCORD_BOT_TOKEN` | Bot トークン |
-| `DISCORD_PUBLIC_KEY` | アプリの Public Key |
+| `DISCORD_CLIENT_SECRET` | OAuth2 の Client Secret |
 | `AZURE_STORAGE_CONNECTION_STRING` | Storage Account の接続文字列（未設定なら `AzureWebJobsStorage` を使う） |
-
-次に Discord Developer Portal の「General Information」で
-**Interactions Endpoint URL** を次に設定します。
-
-```
-https://<function-app-name>.azurewebsites.net/api/interactions
-```
 
 Azure リソースの作成はドキュメントの手順に沿って手動で行ってください
 （このリポジトリには IaC を含みません）。
@@ -357,6 +350,7 @@ Azure リソースの作成はドキュメントの手順に沿って手動で�
 | `AZURE_TENANT_ID` | テナント ID |
 | `AZURE_SUBSCRIPTION_ID` | サブスクリプション ID |
 | `AZURE_FUNCTIONAPP_NAME` | Function App の名前（**未設定ならデプロイはスキップ**） |
+| `AZURE_RESOURCE_GROUP` | Function App のリソースグループ名（ワークフローのプラン判別に使う） |
 
 マネージド ID への **Website Contributor** ロール付与とフェデレーション資格情報の
 作成手順は [docs/shared-bot.md](docs/shared-bot.md) §10 を参照してください。
@@ -367,21 +361,25 @@ Azure リソースの作成はドキュメントの手順に沿って手動で�
 curl https://<function-app-name>.azurewebsites.net/api/health
 ```
 
-### 5. サーバー管理者が `/setup` を実行
+### 5. サーバー管理者が設定ページを開く
 
-サーバー設定の「サーバーを管理」権限を持つメンバーが実行します。
+「サーバーを管理」権限を持つメンバーが、ブラウザで次を開きます
+（Bot の「プロフィールを見る」→「サーバープロフィール」などにも載せられます）:
 
 ```
-/setup channel:#お知らせ
+https://<function-app-name>.azurewebsites.net/api/setup
 ```
 
-- 3秒以内に「✅ 通知先を #お知らせ に設定しました」と本人にだけ見える応答
-- テキスト / アナウンスチャンネル以外は拒否、他サーバーのチャンネルも拒否
-- Bot の権限が足りなければ警告を添えて保存（招待し直せば直る）
-- 次の水曜 13:00 (JST) から通知とイベント作成が始まる
+1. Discord の認可画面で許可すると、**管理権限のあるサーバー一覧**が表示されます
+2. サーバーを選ぶと **テキストチャンネル一覧**（Bot が見えるもの）が出ます
+   - Bot が未参加のサーバーなら、そのサーバー用の招待 URL が表示されます
+3. チャンネルを選んで「設定する」→ 「✅ 通知先を #チャンネル に設定しました」
+
+- アクセストークンは認可コードの交換に1回だけ使われ、保存されません
+- 次の水曜 13:00 (JST) から通知とイベント作成が始まります
 
 Bot をサーバーから抜くと、次回のバッチで自動的に停止（`enabled=false`）になります。
-`/setup` をやり直せば再開できます。
+設定ページで再度設定すれば再開できます。
 
 ## 注意事項
 
