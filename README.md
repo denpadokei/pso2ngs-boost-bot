@@ -10,6 +10,11 @@ DisCal のような「イベント告知 + カレンダー運用」を、この�
 - Discord の**スケジュールイベント**（RSVP 付き）も自動作成・更新
 - Gateway 接続なし。常駐サーバー不要（GitHub Actions の無料枠で運用できます）
 
+> **このリポジトリはテンプレートです。**
+> GitHub の「Use this template」→「Create a new repository」で自分のリポジトリを作り、
+> Secrets を設定すれば、そのまま自分のサーバー用に動きます。
+> 各自が自分の Bot / Webhook を使う前提なので、OAuth アプリの実装や共有サーバーは不要です。
+
 ## 仕組み
 
 情報源は公式プレイヤーズサイトの3か所です。
