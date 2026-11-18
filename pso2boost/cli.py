@@ -20,6 +20,7 @@ from .models import BoostEvent, merge_events
 from .notify import DiscordNotifier
 from .periods import parse_period
 from .schedule import DEFAULT_KEYWORDS, filter_relevant, parse_schedule_html
+from .service import plan_actions
 from .state import State
 from .sync import sync_events
 from .tz import JST, now_jst
@@ -39,13 +40,6 @@ def _parse_now(value: str | None) -> datetime:
         return now_jst()
     parsed = datetime.fromisoformat(value)
     return parsed.replace(tzinfo=JST) if parsed.tzinfo is None else parsed.astimezone(JST)
-
-
-def _due_today(moment: datetime | None, now: datetime) -> bool:
-    """その日の 9 時以降なら「本日」のお知らせを出してよい。"""
-    if moment is None:
-        return False
-    return moment.astimezone(JST).date() == now.date() and now.hour >= 9
 
 
 def _notifier(args) -> DiscordNotifier:
@@ -108,13 +102,6 @@ def _enrich(event: BoostEvent, fetcher: Fetcher, now: datetime) -> BoostEvent:
     return apply_details(event, article)
 
 
-def _was_pending_today(state: State, key: str, now: datetime) -> bool:
-    first_seen = state.first_seen(key)
-    if first_seen is None:
-        return False
-    return first_seen.astimezone(JST).date() == now.date()
-
-
 def cmd_check(args) -> int:
     now = _parse_now(args.now)
     keywords = _keywords()
@@ -162,41 +149,29 @@ def cmd_check(args) -> int:
 
     new_count = 0
     reminder_count = 0
+    enriched_keys: set[str] = set()
 
-    for event in events:
-        enriched = False
-        announced = False
-
-        if not state.is_seen(event.key):
+    for action in plan_actions(events, state, now):
+        event = action.event
+        # 同じイベントへの複数通知で、記事の取得・解析は1回だけ
+        if event.key not in enriched_keys:
             _enrich(event, fetcher, now)
-            enriched = True
+            enriched_keys.add(event.key)
+
+        if action.kind == "new":
             log.info("新着: %s (%s)", event.label, event.period.display())
             notifier.send_event(event, "new", event_link(event), now=now)
             new_count += 1
-            announced = True
             if not effective_dry_run:
                 state.mark_seen(event)
                 state.mark_sent("new", event.key)
-
-        # 告知したその日に始まる場合は、開始リマインドを重ねない
-        if (
-            not announced
-            and _due_today(event.period.start.at, now)
-            and not state.was_sent("start", event.key)
-            and not _was_pending_today(state, event.key, now)
-        ):
-            if not enriched:
-                _enrich(event, fetcher, now)
-                enriched = True
+        elif action.kind == "start":
             log.info("開始リマインド: %s", event.label)
             notifier.send_event(event, "start", event_link(event), now=now)
             reminder_count += 1
             if not effective_dry_run:
                 state.mark_sent("start", event.key)
-
-        if _due_today(event.period.end.at, now) and not state.was_sent("end", event.key):
-            if not enriched:
-                _enrich(event, fetcher, now)
+        else:
             log.info("終了リマインド: %s", event.label)
             notifier.send_event(event, "end", event_link(event), now=now)
             reminder_count += 1
