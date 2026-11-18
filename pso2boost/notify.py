@@ -256,7 +256,7 @@ class DiscordNotifier:
                 payload["avatar_url"] = self.avatar_url
 
         url, headers = self._endpoint()
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             try:
                 response = self.session.post(
                     url, json=payload, headers=headers, timeout=self.timeout
@@ -266,13 +266,20 @@ class DiscordNotifier:
                 log.error("Discord への接続に失敗: %s", exc)
                 return False
             self.last_status = response.status_code
-            if response.status_code == 429 and attempt == 1:
+            if response.status_code == 429 and attempt < 3:
                 retry_after = 1.0
                 try:
                     retry_after = float(response.json().get("retry_after", 1.0))
                 except ValueError:
                     pass
                 time.sleep(min(retry_after, 5.0))
+                continue
+            if response.status_code >= 500 and attempt < 3:
+                log.warning(
+                    "Discord への投稿が一時的に失敗 (HTTP %s, %d/3)",
+                    response.status_code, attempt,
+                )
+                time.sleep(2**attempt)
                 continue
             if response.status_code >= 400:
                 log.error(

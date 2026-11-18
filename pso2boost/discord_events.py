@@ -110,7 +110,10 @@ class ScheduledEventsApi:
 
     def list(self) -> list[dict[str, Any]]:
         data = self._request("GET", self._collection_url())
-        return data if isinstance(data, list) else []
+        if not isinstance(data, list):
+            # 「0件」と「形式不正」を区別し、重複判定の誤りを防ぐ
+            raise DiscordApiError("Discord のイベント一覧の形式が不正です")
+        return data
 
     # --------------------------------------------------------------- request
     def _collection_url(self) -> str:
@@ -127,9 +130,13 @@ class ScheduledEventsApi:
 
         last_error = ""
         for attempt in range(1, 4):
-            response = self.session.request(
-                method, url, json=payload, timeout=self.timeout
-            )
+            try:
+                response = self.session.request(
+                    method, url, json=payload, timeout=self.timeout
+                )
+            except requests.RequestException as exc:
+                # 接続エラーは sync_events / runner の catches に届くよう型を揃える
+                raise DiscordApiError(f"Discord への接続に失敗: {exc}") from exc
             if response.status_code == 429:
                 retry_after = 1.0
                 try:

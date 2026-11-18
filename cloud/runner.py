@@ -23,7 +23,7 @@ import requests
 
 from pso2boost.discover import discover_from_rss
 from pso2boost.discord_events import ScheduledEventsApi
-from pso2boost.fetch import Fetcher, SCHEDULE_URL
+from pso2boost.fetch import Fetcher, SCHEDULE_URL, FetchError
 from pso2boost.maintenance import MaintenanceCalendar, fetch_calendar
 from pso2boost.models import BoostEvent, merge_events
 from pso2boost.notify import DiscordNotifier
@@ -35,7 +35,7 @@ from pso2boost.tz import now_jst
 
 from .config import CloudConfig
 from .discord import DiscordRest, DiscordRestError
-from .storage import GuildConfig, SHARED_PARTITION, TableStore
+from .storage import GuildConfig, LAST_ERROR_MAX, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class RunSummary:
     updated: int = 0
     deleted: int = 0
     failed: int = 0
+    status: str = "ok"  # ok / skipped / partial / failed
     details: list[GuildResult] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
 
@@ -156,7 +157,8 @@ def process_guild(
     result.deleted = sync_result.deleted
     result.errors += sync_result.errors
     if sync_result.errors:
-        result.last_error = "Discord イベントの同期に失敗"
+        detail = " / ".join(sync_result.error_messages[:2])
+        result.last_error = f"Discord イベントの同期に失敗: {detail}"[:LAST_ERROR_MAX]
 
     notifier = notifier or _make_notifier(config, target)
     for action in work.actions:
@@ -169,8 +171,18 @@ def process_guild(
         if not sent:
             result.errors += 1
             status = getattr(notifier, "last_status", None)
-            detail = f" (HTTP {status})" if status else ""
-            result.last_error = f"{action.kind} 通知の送信に失敗{detail}"
+            if status in (403, 404):
+                result.last_error = (
+                    f"{action.kind} の投稿が拒否されました (HTTP {status}): "
+                    "チャンネルの投稿権限を確認してください"
+                )
+                try:
+                    store.set_permissions_ok(target.guild_id, False)
+                except Exception:
+                    log.warning("permissions_ok の更新に失敗: %s", target.guild_id)
+            else:
+                detail = f" (HTTP {status})" if status else ""
+                result.last_error = f"{action.kind} 通知の送信に失敗{detail}"
             continue
         result.notified += 1
         # 投稿に成功したものだけフラグを立てる（失敗は次回再試行）
@@ -261,93 +273,147 @@ def run_weekly(
     api_factory: Callable[[GuildTarget], ScheduledEventsApi] | None = None,
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
 ) -> RunSummary:
-    """Timer から呼ばれる週次バッチの入口。"""
+    """Timer から呼ばれる週次バッチの入口。
+
+    排他ロックを取得できた実行だけが処理を行い、1サーバーの失敗は
+    GuildResult に閉じ込めて他サーバーへ影響させない。
+    """
     now = now or now_jst()
     summary = RunSummary()
 
     if not config.bot_token:
         summary.actions.append("DISCORD_BOT_TOKEN が未設定のため何もしません")
+        summary.status = "skipped"
         log.error("DISCORD_BOT_TOKEN が未設定です")
         return summary
 
     store = store or TableStore(config.storage_connection)
     store.ensure_tables()
-    store.prune_sessions(now)
-    targets = resolve_targets(config, store)
-    # Bot がキックされたサーバーは無効化して対象から外す（Phase 3）
-    targets = filter_available_targets(
-        targets, config, store, now, guild_client=guild_client
-    )
-    summary.guilds = len(targets)
-    if not targets:
-        summary.actions.append("対象サーバーがありません（/setup または環境変数で登録）")
-        log.warning("対象サーバーがありません")
+    if not store.try_acquire_lock(now):
+        summary.actions.append("別の同期が実行中です（ロック取得失敗）")
+        summary.status = "skipped"
+        log.warning("別の同期が実行中のためスキップします")
         return summary
 
-    fetcher = fetcher or Fetcher(delay=config.delay)
-    calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
+    try:
+        # 掃除はおまけ。失敗しても本処理は止めない
+        try:
+            store.prune_sessions(now)
+        except Exception as exc:
+            log.warning("セッションの掃除に失敗しました（同期は続行）: %s", exc)
 
-    # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
-    shared_state = store.load_state(SHARED_PARTITION, now)
-    events = discover_events(fetcher, shared_state, now, schedule_events, calendar)
-    store.save_state(SHARED_PARTITION, shared_state)
-    log.info("イベント解析: %d 件", len(events))
-
-    # 準備は直列（PSO2 への HTTP を1回に抑える）
-    works = [
-        prepare_guild(target, events=events, now=now, store=store)
-        for target in targets
-    ]
-    # 記事本文の取得もメインスレッドで1回だけ（イベントは全サーバー共通のオブジェクト）
-    enriched: set[str] = set()
-    for work in works:
-        for action in work.actions:
-            if action.event.key not in enriched:
-                enrich_event(action.event, fetcher, now)
-                enriched.add(action.event.key)
-
-    def run_one(work: GuildWork) -> GuildResult:
-        return process_guild(
-            work,
-            config=config,
-            now=now,
-            store=store,
-            api=api_factory(work.target) if api_factory else None,
-            notifier=notifier_factory(work.target) if notifier_factory else None,
+        targets = resolve_targets(config, store)
+        # Bot がキックされたサーバーは無効化して対象から外す（Phase 3）
+        targets = filter_available_targets(
+            targets, config, store, now, guild_client=guild_client
         )
+        summary.guilds = len(targets)
+        if not targets:
+            summary.actions.append("対象サーバーがありません（設定ページで登録してください）")
+            summary.status = "skipped"
+            log.warning("対象サーバーがありません")
+            return summary
 
-    workers = max(1, min(config.concurrency, len(works)))
-    if workers == 1:
-        results = [run_one(work) for work in works]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(run_one, works))
-
-    for target, result in zip(targets, results):
-        store.record_guild_run(
-            target.guild_id, now, last_error=None if result.ok else result.last_error
-        )
-        if result.ok:
-            log.info(
-                "サーバー %s: 通知 %d / 作成 %d / 更新 %d / 削除 %d",
-                target.guild_id,
-                result.notified,
-                result.created,
-                result.updated,
-                result.deleted,
+        fetcher = fetcher or Fetcher(delay=config.delay)
+        try:
+            calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
+            # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
+            shared_state = store.load_state(SHARED_PARTITION, now)
+            events = discover_events(
+                fetcher, shared_state, now, schedule_events, calendar
             )
+            store.save_state(SHARED_PARTITION, shared_state)
+        except FetchError as exc:
+            message = f"PSO2 データの取得に失敗: {exc}"
+            summary.actions.append(message)
+            summary.status = "failed"
+            log.error(message)
+            return summary
+        log.info("イベント解析: %d 件", len(events))
+
+        # 準備は直列（PSO2 への HTTP を1回に抑える）
+        works: list[GuildWork] = []
+        prepare_failures: list[GuildResult] = []
+        for target in targets:
+            try:
+                works.append(
+                    prepare_guild(target, events=events, now=now, store=store)
+                )
+            except Exception as exc:
+                log.exception("サーバー %s の準備に失敗", target.guild_id)
+                prepare_failures.append(
+                    GuildResult(
+                        guild_id=target.guild_id,
+                        channel_id=target.channel_id,
+                        errors=1,
+                        last_error=f"{type(exc).__name__}: {exc}"[:LAST_ERROR_MAX],
+                    )
+                )
+        # 記事本文の取得もメインスレッドで1回だけ（イベントは全サーバー共通のオブジェクト）
+        enriched: set[str] = set()
+        for work in works:
+            for action in work.actions:
+                if action.event.key not in enriched:
+                    enrich_event(action.event, fetcher, now)
+                    enriched.add(action.event.key)
+
+        def run_one(work: GuildWork) -> GuildResult:
+            try:
+                return process_guild(
+                    work,
+                    config=config,
+                    now=now,
+                    store=store,
+                    api=api_factory(work.target) if api_factory else None,
+                    notifier=notifier_factory(work.target) if notifier_factory else None,
+                )
+            except Exception as exc:
+                # 契約: 1サーバーの失敗で全体を止めない
+                log.exception("サーバー %s の処理で例外", work.target.guild_id)
+                return GuildResult(
+                    guild_id=work.target.guild_id,
+                    channel_id=work.target.channel_id,
+                    errors=1,
+                    last_error=f"{type(exc).__name__}: {exc}"[:LAST_ERROR_MAX],
+                )
+
+        workers = max(1, min(config.concurrency, len(works)))
+        if workers == 1:
+            results = [run_one(work) for work in works]
         else:
-            summary.failed += 1
-            log.error(
-                "サーバー %s で失敗: %s（他のサーバーは続行）",
-                target.guild_id,
-                result.last_error,
-            )
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                results = list(pool.map(run_one, works))
 
-    summary.notified = sum(result.notified for result in results)
-    summary.created = sum(result.created for result in results)
-    summary.updated = sum(result.updated for result in results)
-    summary.deleted = sum(result.deleted for result in results)
-    summary.details = results
-    log.info("週次同期完了: %s", summary.summary)
-    return summary
+        # 準備失敗も含めて結果を記録する
+        all_results = results + prepare_failures
+        for result in all_results:
+            try:
+                store.record_guild_run(
+                    result.guild_id, now,
+                    last_error=None if result.ok else result.last_error,
+                )
+            except Exception as exc:
+                log.error("実行結果の保存に失敗 (%s): %s", result.guild_id, exc)
+            if result.ok:
+                log.info(
+                    "サーバー %s: 通知 %d / 作成 %d / 更新 %d / 削除 %d",
+                    result.guild_id, result.notified, result.created,
+                    result.updated, result.deleted,
+                )
+            else:
+                summary.failed += 1
+                log.error(
+                    "サーバー %s で失敗: %s（他のサーバーは続行）",
+                    result.guild_id, result.last_error,
+                )
+
+        summary.notified = sum(result.notified for result in all_results)
+        summary.created = sum(result.created for result in all_results)
+        summary.updated = sum(result.updated for result in all_results)
+        summary.deleted = sum(result.deleted for result in all_results)
+        summary.details = all_results
+        summary.status = "partial" if summary.failed else "ok"
+        log.info("週次同期完了: %s", summary.summary)
+        return summary
+    finally:
+        store.release_lock()

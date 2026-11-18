@@ -3,6 +3,8 @@ from datetime import datetime
 import pytest
 from unittest.mock import MagicMock
 
+from azure.data.tables import TableClient, TableServiceClient
+
 from cloud.storage import (
     GUILD_PARTITION,
     GuildConfig,
