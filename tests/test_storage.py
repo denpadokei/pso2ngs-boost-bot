@@ -1,5 +1,8 @@
 from datetime import datetime
 
+import pytest
+from unittest.mock import MagicMock
+
 from cloud.storage import (
     GUILD_PARTITION,
     GuildConfig,
@@ -166,3 +169,79 @@ def test_record_guild_run_updates_registered_guild_only():
     # 成功すれば last_error はクリアされる
     store.record_guild_run("123", NOW, last_error=None)
     assert {g.guild_id: g for g in store.list_guilds()}["123"].last_error == ""
+
+
+# ------------------------------------------- 実SDK との契約（表面の保証）
+def test_real_sdk_surface_matches_adapter():
+    """アダプタが使うメソッドが実 SDK に存在することを保証する。
+
+    実機で ``AttributeError: 'TableServiceClient' object has no attribute
+    'list_entities'`` が出た反省。Fake が同じ IF を模倣しているため、
+    SDK 側の表面はこのテストで固定する。
+    """
+    tables = pytest.importorskip("azure.data.tables")
+    service_client = tables.TableServiceClient
+    table_client = tables.TableClient
+
+    # アダプタが使う TableServiceClient のメソッド
+    for method in ("list_tables", "create_table", "get_table_client"):
+        assert hasattr(service_client, method), method
+        assert callable(getattr(service_client, method)), method
+
+    # アダプタが使う TableClient のメソッド
+    for method in ("query_entities", "upsert_entity", "delete_entity"):
+        assert hasattr(table_client, method), method
+        assert callable(getattr(table_client, method)), method
+
+    # 過去に間違えて使ってしまった（存在しない）メソッドは叩かない
+    for method in ("list_entities", "upsert_entity", "table_exists"):
+        assert not hasattr(service_client, method), (
+            f"TableServiceClient に {method} は無いはず"
+        )
+
+    # upsert_entity の既定が MERGE である（部分更新で他の列を消さない）
+    import inspect
+
+    signature = inspect.signature(table_client.upsert_entity)
+    assert signature.parameters["mode"].default.value == "merge"
+
+
+def test_adapter_translates_calls_to_real_sdk():
+    """_TableServiceAdapter が TableStore の IF を SDK の呼び出しへ変換する。"""
+    from types import SimpleNamespace
+
+    from cloud.storage import _TableServiceAdapter
+
+    service = MagicMock()
+    guilds_item = SimpleNamespace(name="guilds")
+    service.list_tables.return_value = [SimpleNamespace(name="other"), guilds_item]
+    table = MagicMock()
+    table.query_entities.return_value = iter(
+        [{"PartitionKey": "guild", "RowKey": "111", "channel_id": "c1"}]
+    )
+    service.get_table_client.return_value = table
+
+    adapter = _TableServiceAdapter(service)
+
+    assert adapter.table_exists("guilds") is True
+    assert adapter.table_exists("state") is False
+
+    adapter.create_table("state")
+    service.create_table.assert_called_once_with("state")
+
+    rows = adapter.list_entities("guilds", "PartitionKey eq '111'")
+    service.get_table_client.assert_called_with("guilds")
+    table.query_entities.assert_called_with("PartitionKey eq '111'")
+    assert rows == [{"PartitionKey": "guild", "RowKey": "111", "channel_id": "c1"}]
+
+    entity = {"PartitionKey": "guild", "RowKey": "111", "enabled": True}
+    adapter.upsert_entity("guilds", entity)
+    table.upsert_entity.assert_called_once_with(entity)
+
+    adapter.delete_entity("state", "111", "event:old")
+    table.delete_entity.assert_called_with(partition_key="111", row_key="event:old")
+
+    # フィルタ無し（全件）も None で呼べる
+    table.query_entities.reset_mock()
+    adapter.list_entities("state")
+    table.query_entities.assert_called_with(None)
