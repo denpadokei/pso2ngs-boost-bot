@@ -172,6 +172,8 @@ def callback(
         f'<p class="note">{html.escape(str(user.get("username") or ""))} さんが管理できるサーバー:</p>'
         f"<ul>{items}</ul>"
         '<p class="note">通知先はこのあと選べます。毎週水曜 13:00 (JST) に通知します。</p>'
+        '<p class="note">設定を変えずにイベントの同期だけしたい場合は '
+        '<a href="/api/setup/sync">今すぐ同期</a>。</p>'
     )
     token_value = oauth.make_session_id()
     try:
