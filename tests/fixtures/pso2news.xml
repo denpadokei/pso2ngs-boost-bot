@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- テスト用の抜粋。解析に必要な項目だけを残しています。 -->
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<channel rdf:about="https://pso2.jp/players/">
+<title>『PSO2 ニュージェネシス』プレイヤーズサイト｜SEGA</title>
+<link>https://pso2.jp/players/</link>
+<description>新着情報</description>
+<dc:date>2026-11-18T09:08:00+09:00</dc:date>
+<items>
+<rdf:Seq>
+<rdf:li rdf:resource="https://pso2.jp/players/news/cgcNov26/"/>
+<rdf:li rdf:resource="https://youtube.com/live/NhXOlE19k8k"/>
+<rdf:li rdf:resource="https://bit.ly/4dYd0SP"/>
+<rdf:li rdf:resource="https://www.sega.co.jp/release/261109_1.html"/>
+</rdf:Seq>
+</items>
+</channel>
+
+<item rdf:about="https://pso2.jp/players/news/cgcNov26/">
+<title>コスチュームGETキャンペーン</title>
+<link>https://pso2.jp/players/news/cgcNov26/</link>
+<description />
+<dc:date>2026-11-04T12:00:00+09:00</dc:date>
+</item>
+
+<item rdf:about="https://youtube.com/live/NhXOlE19k8k">
+<title>11/24（火）公式番組『NGS ヘッドライン WAVE』</title>
+<link>https://youtube.com/live/NhXOlE19k8k</link>
+<description />
+<dc:date>2026-11-17T11:00:00+09:00</dc:date>
+</item>
+
+<item rdf:about="https://bit.ly/4dYd0SP">
+<title>BitCash-第72弾- 冬到来！アークス応援キャンペーン！</title>
+<link>https://bit.ly/4dYd0SP</link>
+<description />
+<dc:date>2026-11-17T11:00:00+09:00</dc:date>
+</item>
+
+<item rdf:about="https://www.sega.co.jp/release/261109_1.html">
+<title>個人情報流出に関するお詫びとお知らせ</title>
+<link>https://www.sega.co.jp/release/261109_1.html</link>
+<description />
+<dc:date>2026-11-09T14:00:00+09:00</dc:date>
+</item>
+</rdf:RDF>

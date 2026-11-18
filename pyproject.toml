@@ -1,0 +1,10 @@
+[project]
+name = "pso2ngs-boost-bot"
+version = "0.1.0"
+description = "PSO2NGS のブーストキャンペーンを Discord に通知する"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+readme = "README.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "seen": {
+    "d9b3e125c142": {
+      "label": "ブーストキャンペーン 第2弾",
+      "period": "2026/11/25 12:00 ～ 2026/12/02 メンテナンス開始",
+      "url": "https://pso2.jp/players/news/cgcNov26/#cp3",
+      "first_seen": "2026-11-18T09:37:05.961797+09:00",
+      "last_seen": "2026-11-18T09:37:05.961797+09:00"
+    },
+    "79c8704046d6": {
+      "label": "ブーストキャンペーン 第1弾",
+      "period": "2026/11/11 12:00 ～ 2026/11/18 メンテナンス開始",
+      "url": "https://pso2.jp/players/news/cgcNov26/#cp3",
+      "first_seen": "2026-11-18T09:37:05.961797+09:00",
+      "last_seen": "2026-11-18T09:37:05.961797+09:00"
+    }
+  },
+  "sent": {
+    "new:d9b3e125c142": "2026-11-18T09:37:05.961797+09:00",
+    "new:79c8704046d6": "2026-11-18T09:37:05.961797+09:00",
+    "end:79c8704046d6": "2026-11-18T09:37:05.961797+09:00"
+  },
+  "rss": {
+    "https://pso2.jp/players/news/i_maintenance_20261118/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/i_20261113/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/i_20261111/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/community/comic/central/252/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/update/2026-11/#update10": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/i_20261105/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/i_20261007/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/fashionitems/20261104/index.html": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/community/comic/central/251/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/update/2026-11/#update02": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/5ththankful/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/cgcNov26/": "2026-11-18T09:37:05.961797+09:00",
+    "https://pso2.jp/players/news/sdqf2026/": "2026-11-18T09:37:05.961797+09:00"
+  },
+  "discord": {
+    "d9b3e125c142": {
+      "id": "1572410353986572388",
+      "signature": "28cbc17ad8f08143",
+      "name": "ブーストキャンペーン 第2弾",
+      "end": "2026-12-02T11:00:00+09:00",
+      "updated": "2026-11-18T09:37:05.961797+09:00"
+    }
+  }
+}
