@@ -47,8 +47,10 @@ jobs:
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）。
-      # App Service Plan の読み取りは Website Contributor の権限外なので、
-      # サイト自身の properties.sku（FlexConsumption / Dynamic）で判別する。
+      # App Service Plan の読み取りは Website Contributor の権限外、
+      # サブスクリプション一覧もオブジェクトスコープでは空になるため、
+      # サイト自身の properties.sku（FlexConsumption / Dynamic）を
+      # az functionapp show で読む（AZURE_RESOURCE_GROUP 推奨、無ければ一覧へフォールバック）。
       # - Flex Consumption: remote-build（Oryx）。scm-do-build 系は使わない
       # - 従来の Consumption: scm-do-build-during-deployment + enable-oryx-build
       - name: Detect hosting plan
@@ -56,7 +58,12 @@ jobs:
         run: |
           set -euo pipefail
           app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
-          sku=$(az functionapp list --query "[?name=='${app}'].properties.sku | [0]" -o tsv)
+          rg="${{ vars.AZURE_RESOURCE_GROUP }}"
+          if [ -n "$rg" ]; then
+            sku=$(az functionapp show --name "$app" --resource-group "$rg" --query "properties.sku" -o tsv)
+          else
+            sku=$(az functionapp list --query "[?name=='${app}'].properties.sku | [0]" -o tsv)
+          fi
           if [ -z "$sku" ] || [ "$sku" = "None" ]; then
             echo "関数アプリ '${app}' が見つかりません" >&2
             exit 1
