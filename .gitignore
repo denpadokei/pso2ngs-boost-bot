@@ -7,3 +7,4 @@ venv/
 tmp_*.json
 *.log
 *.tmp
+local.settings.json
