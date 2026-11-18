@@ -7,12 +7,22 @@ dry-run か、失敗時にフラグを立てるか）は、CLI とクラウド�
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
+from .article import apply_details, parse_article_html
+from .fetch import SITE, FetchError
 from .models import BoostEvent
 from .state import State
 from .tz import JST
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .fetch import Fetcher
+
+log = logging.getLogger(__name__)
 
 
 def due_today(moment: datetime | None, now: datetime) -> bool:
@@ -69,3 +79,25 @@ def plan_actions(
             actions.append(PlannedAction(event, "end"))
 
     return actions
+
+
+def enrich_event(
+    event: BoostEvent, fetcher: "Fetcher", now: datetime
+) -> BoostEvent:
+    """スケジュールの行に、告知記事の詳細（対象クエスト・倍率）を足す。
+
+    取得に失敗したときは概要のまま通知する（イベント自体は止めない）。
+    ``apply_details`` は event をその場で書き換えるため、戻り値は無視してもよい。
+    """
+    if not event.url:
+        return event
+    base = event.url.split("#")[0]
+    if urlparse(base).netloc and urlparse(base).netloc != urlparse(SITE).netloc:
+        return event  # 外部サイト（bit.ly など）は本文を持っていない
+    try:
+        html = fetcher.get(base, cache=True)
+    except FetchError as exc:
+        log.warning("告知記事を取得できませんでした（概要のみ通知）: %s", exc)
+        return event
+    article = parse_article_html(html, base, now)
+    return apply_details(event, article)
