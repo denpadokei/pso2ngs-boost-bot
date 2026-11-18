@@ -55,7 +55,14 @@ def _response(page: setup_pages.Page) -> func.HttpResponse:
 )
 def weekly_sync(timer: func.TimerRequest) -> None:
     """全サーバーの週次同期（新着・開始・終了の通知とイベント作成）。"""
-    runner.run_weekly(cloud_config.CloudConfig.from_env())
+    summary = runner.run_weekly(cloud_config.CloudConfig.from_env())
+    # 例外を閉じ込めた分、失敗をInvocationの成否として明示的に伝える
+    if summary.status in {"failed", "partial"}:
+        raise RuntimeError(f"週次同期に失敗: {summary.summary} / {summary.actions}")
+    if summary.status == "skipped" and not any(
+        "実行中" in action for action in summary.actions
+    ):
+        raise RuntimeError(f"週次同期が実行されませんでした: {summary.actions}")
 
 
 @app.function_name(name="health")
@@ -73,7 +80,9 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "client_secret": bool(config.client_secret),
     }
     return func.HttpResponse(
-        json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
+        json.dumps(body, ensure_ascii=False),
+        status_code=200 if configured else 503,
+        mimetype="application/json",
     )
 
 

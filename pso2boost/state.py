@@ -152,7 +152,10 @@ class State:
         self._data["discord"] = {
             key: entry
             for key, entry in self._data["discord"].items()
-            if isinstance(entry, dict) and fresh(parse(entry.get("updated")))
+            # 追跡は「最終更新」ではなく「イベント終了」から保持する。
+            # 長期キャンペーンの追跡が途中で消え、Discord 側に孤児が残るのを防ぐ。
+            if isinstance(entry, dict)
+            and fresh(parse(entry.get("end")) or parse(entry.get("updated")))
         }
 
     def save(self) -> None:

@@ -137,6 +137,7 @@ def cmd_check(args) -> int:
 
     new_count = 0
     reminder_count = 0
+    failed_count = 0
     enriched_keys: set[str] = set()
 
     for action in plan_actions(events, state, now):
@@ -165,6 +166,7 @@ def cmd_check(args) -> int:
         if not sent:
             # 投稿に失敗したらフラグを立てず、次回の実行で再試行する
             log.error("通知に失敗したため状態を進めません: %s (%s)", event.label, action.kind)
+            failed_count += 1
             continue
         if action.kind == "new":
             state.mark_seen(event)
@@ -182,7 +184,7 @@ def cmd_check(args) -> int:
         reminder_count,
         "(dry-run のため未保存)" if effective_dry_run else f"{len(state)} 件",
     )
-    return 0
+    return 2 if failed_count else 0
 
 
 def cmd_list(args) -> int:

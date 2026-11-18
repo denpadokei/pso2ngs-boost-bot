@@ -211,6 +211,7 @@ class DiscordNotifier:
         self.session = session or requests
         # 直近の投稿結果（HTTP ステータス）。失敗の記録に使う。
         self.last_status: int | None = None
+        self.disabled_reason = ""  # 送信不可の理由（設定不備と通信失敗を区別）
 
     @property
     def enabled(self) -> bool:
@@ -239,9 +240,11 @@ class DiscordNotifier:
             content = f"<@&{self.mention_role_id}>"
 
         if not self.enabled:
+            self.disabled_reason = "通知先（Webhook URL または Bot トークン＋チャンネル）が未設定"
             print(render_text(event, kind, style=self.style, event_url=event_url, now=now))
             print("-" * 60)
             return False
+        self.disabled_reason = ""
 
         return self._post(embed, content)
 

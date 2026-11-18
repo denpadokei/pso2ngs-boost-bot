@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import time
 from urllib.parse import urlencode
 
@@ -33,6 +34,8 @@ from .discord import (
 )
 from .storage import GuildConfig, TableStore
 from pso2boost.tz import now_jst
+
+log = logging.getLogger(__name__)
 
 STATE_COOKIE = "pso2state"
 SESSION_COOKIE = "pso2session"
@@ -231,7 +234,11 @@ def _bot_permissions(
         me = discord.get_me()
         member = discord.get_guild_member(guild_id, str(me.get("id") or ""))
         roles = discord.get_guild_roles(guild_id)
-    except Exception:  # 権限確認はベストエフォート（失敗しても選択は続行）
+    except (DiscordRestError, requests.RequestException) as exc:
+        log.warning("Bot の権限確認に失敗しました (guild=%s): %s", guild_id, exc)
+        return None  # ベストエフォート（判定不能であることは呼び出し側で表示する）
+    except Exception as exc:
+        log.exception("Bot の権限確認で予期しないエラー (guild=%s)", guild_id)
         return None
     role_ids = {str(role) for role in member.get("roles") or []}
     return role_ids, roles
@@ -273,6 +280,12 @@ def channels(
         return Page(200, _error_page(f"チャンネル一覧を取得できませんでした: {exc}"))
 
     permission_info = _bot_permissions(discord, guild_id)
+    permission_note = (
+        '<p class="error">⚠️ Bot の権限を確認できませんでした。'
+        "投稿できないチャンネルがあるかもしれません。</p>"
+        if permission_info is None
+        else ""
+    )
 
     def label(channel: dict) -> str:
         name = html.escape(str(channel.get("name") or channel.get("id")))
@@ -299,7 +312,8 @@ def channels(
         f'<p><select name="channel_id">{options}</select></p>'
         f'<p><button class="button" type="submit">設定する</button></p>'
         "</form>"
-        '<p class="note">毎週水曜 13:00 (JST) にブーストキャンペーンの通知と'
+        + permission_note
+        + '<p class="note">毎週水曜 13:00 (JST) にブーストキャンペーンの通知と'
         "イベント作成を行います。</p>"
     )
     return Page(200, render_page("通知先の選択", body))

@@ -14,6 +14,7 @@ asyncio.Semaphore の代わりに max_workers を同時数の上限として使�
 from __future__ import annotations
 
 import logging
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -170,8 +171,11 @@ def process_guild(
         )
         if not sent:
             result.errors += 1
+            disabled_reason = getattr(notifier, "disabled_reason", "") or ""
             status = getattr(notifier, "last_status", None)
-            if status in (403, 404):
+            if disabled_reason:
+                result.last_error = f"{action.kind} の投稿先が未設定です（{disabled_reason}）"
+            elif status in (403, 404):
                 result.last_error = (
                     f"{action.kind} の投稿が拒否されました (HTTP {status}): "
                     "チャンネルの投稿権限を確認してください"
@@ -188,10 +192,25 @@ def process_guild(
         # 投稿に成功したものだけフラグを立てる（失敗は次回再試行）
         if action.kind == "new":
             work.state.mark_seen(action.event)
-        work.state.mark_sent(action.kind, action.event.key)
+            work.state.mark_sent("new", action.event.key)
+        else:
+            work.state.mark_sent(action.kind, action.event.key)
+
+        # 送信成功をできるだけ早く永続化し、保存失敗時の重複リスクを減らす
+        try:
+            store.save_state(target.guild_id, work.state)
+        except Exception as exc:
+            log.error("通知後の状態保存に失敗 (%s): %s", target.guild_id, exc)
+            result.errors += 1
+            result.last_error = f"通知後の状態保存に失敗（次回重複の可能性）: {exc}"
 
     work.state.prune(days=config.state_retention_days)
-    store.save_state(target.guild_id, work.state)
+    try:
+        store.save_state(target.guild_id, work.state)
+    except Exception as exc:
+        log.error("最終状態の保存に失敗 (%s): %s", target.guild_id, exc)
+        result.errors += 1
+        result.last_error = f"最終状態の保存に失敗（次回重複の可能性）: {exc}"
     return result
 
 
@@ -207,8 +226,11 @@ def _make_notifier(config: CloudConfig, target: GuildTarget) -> DiscordNotifier:
 def resolve_targets(config: CloudConfig, store: TableStore) -> list[GuildTarget]:
     """対象サーバーを決める。Table の登録を優先し、なければ環境変数へフォールバック。"""
     guilds: list[GuildConfig] = [
-        guild for guild in store.list_guilds() if guild.enabled
+        guild for guild in store.list_guilds() if guild.enabled and guild.channel_id
     ]
+    for guild in store.list_guilds():
+        if guild.enabled and not guild.channel_id:
+            log.warning("サーバー %s は通知先チャンネルが未設定のため対象外", guild.guild_id)
     if guilds:
         return [
             GuildTarget(guild.guild_id, guild.channel_id, guild.mention_role_id)
@@ -289,7 +311,8 @@ def run_weekly(
 
     store = store or TableStore(config.storage_connection)
     store.ensure_tables()
-    if not store.try_acquire_lock(now):
+    lock_owner = secrets.token_hex(8)
+    if not store.try_acquire_lock(now, lock_owner):
         summary.actions.append("別の同期が実行中です（ロック取得失敗）")
         summary.status = "skipped"
         log.warning("別の同期が実行中のためスキップします")
@@ -416,4 +439,4 @@ def run_weekly(
         log.info("週次同期完了: %s", summary.summary)
         return summary
     finally:
-        store.release_lock()
+        store.release_lock(lock_owner)

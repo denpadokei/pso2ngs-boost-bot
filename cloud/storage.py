@@ -393,11 +393,12 @@ class TableStore:
         return removed
 
     # ------------------------------------------------------------------ lock
-    def try_acquire_lock(self, now: datetime) -> bool:
+    def try_acquire_lock(self, now: datetime, owner: str) -> bool:
         """週次バッチの排他ロックを取得する（TTL失効分は奪う）。"""
         entity = {
             "PartitionKey": LOCK_PARTITION,
             "RowKey": LOCK_ROW,
+            "owner": owner,
             "exp": int(now.timestamp()) + LOCK_TTL_SECONDS,
         }
         try:
@@ -419,8 +420,17 @@ class TableStore:
                     return False
             return False
 
-    def release_lock(self) -> None:
+    def release_lock(self, owner: str) -> None:
+        """自分のロックだけを解放する（TTL奪取後に他人のを消さない）。"""
         try:
+            rows = self._service.list_entities(
+                self.state_table, query=f"PartitionKey eq '{LOCK_PARTITION}'"
+            )
+            existing = next(
+                (row for row in rows if str(row.get("RowKey")) == LOCK_ROW), None
+            )
+            if existing is None or str(existing.get("owner") or "") != owner:
+                return
             self._service.delete_entity(self.state_table, LOCK_PARTITION, LOCK_ROW)
         except Exception:  # TTL で失効するため、解放失敗は致命的ではない
             log.warning("ロックの解放に失敗しました（TTLで失効します）")

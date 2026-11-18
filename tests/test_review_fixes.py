@@ -106,22 +106,29 @@ def test_one_guild_exception_does_not_stop_others():
 def test_lock_prevents_overlapping_runs():
     store = make_store()
     lock_now = now_jst()  # 実行時計と同じ基準を使う
-    assert store.try_acquire_lock(lock_now) is True
-    assert store.try_acquire_lock(lock_now) is False
+    assert store.try_acquire_lock(lock_now, "owner-A") is True
+    assert store.try_acquire_lock(lock_now, "owner-B") is False
 
     run, _notifiers = make_runner_context(store)
     summary = run()
     assert summary.status == "skipped"
     assert any("実行中" in action for action in summary.actions)
 
-    store.release_lock()
+    store.release_lock("owner-B")  # 他人の所有権では解放されない
+    assert run().status == "skipped"
+    store.release_lock("owner-A")
     assert run().status == "ok"
 
 
 def test_expired_lock_can_be_taken_over():
     store = make_store()
-    assert store.try_acquire_lock(now_jst() - timedelta(minutes=20)) is True
-    assert store.try_acquire_lock(now_jst()) is True  # 失効分を奪う
+    assert store.try_acquire_lock(now_jst() - timedelta(minutes=20), "old") is True
+    assert store.try_acquire_lock(now_jst(), "new") is True  # 失効分を奪う
+    store.release_lock("old")  # 古い所有者は新しいロックを消せない
+    rows = store._service.list_entities(
+        store.state_table, query="PartitionKey eq '_lock'"
+    )
+    assert any(str(row.get("owner")) == "new" for row in rows)
 
 
 # ---------------------------------------------------------- MEDIUM: 権限更新
@@ -229,3 +236,115 @@ def test_error_page_returns_http_500_but_user_cancel_stays_200():
     assert entry._response(Page(200, _error_page("boom"))).status_code == 500
     assert entry._response(Page(200, render_page("ok", "<h1>ok</h1>"))).status_code == 200
     assert entry._response(Page(403, _error_page("denied"))).status_code == 403
+
+
+# --------------------------------------- 再レビュー N-1: Timer の失敗シグナル
+def test_weekly_timer_raises_on_failed_or_partial(monkeypatch):
+    import function_app as entry
+
+    class S:
+        status = "failed"
+        summary = "失敗サマリ"
+        actions = ["データ取得失敗"]
+
+    class FakeConfig:
+        @staticmethod
+        def from_env():
+            return object()
+
+    monkeypatch.setattr(entry.cloud_config, "CloudConfig", FakeConfig)
+    monkeypatch.setattr(entry.runner, "run_weekly", lambda *a, **k: S())
+    with pytest.raises(RuntimeError, match="週次同期に失敗"):
+        entry.weekly_sync(None)
+
+    S.status = "ok"
+    entry.weekly_sync(None)  # 成功時は例外なし
+
+    S.status = "skipped"
+    S.actions = ["別の同期が実行中です"]
+    entry.weekly_sync(None)  # ロック競合は正当なスキップ
+
+
+def test_health_returns_503_when_degraded(monkeypatch):
+    import function_app as entry
+
+    class C:
+        bot_token = ""
+        storage_connection = "cs"
+        client_secret = "secret"
+
+    class FakeConfig:
+        @staticmethod
+        def from_env():
+            return C()
+
+    monkeypatch.setattr(entry.cloud_config, "CloudConfig", FakeConfig)
+    response = entry.health(None)
+    assert response.status_code == 503
+    assert "degraded" in response.get_body().decode("utf-8")
+
+
+# --------------------------------------------- 再レビュー R-4: Discord REST
+def test_discord_rest_normalizes_connection_error():
+    from cloud.discord import DiscordRest
+
+    class Session:
+        headers: dict = {}
+
+        def get(self, *args, **kwargs):
+            raise requests.ConnectionError("offline")
+
+    rest = DiscordRest("token", session=Session())
+    with pytest.raises(DiscordRestError, match="接続に失敗"):
+        rest.get_channel("123")
+
+
+def test_discord_rest_retries_server_errors(monkeypatch):
+    import cloud.discord as discord_module
+    from cloud.discord import DiscordRest
+
+    monkeypatch.setattr(discord_module.time, "sleep", lambda _seconds: None)
+
+    class Response:
+        def __init__(self, status: int) -> None:
+            self.status_code = status
+            self.text = ""
+
+        def json(self):
+            return {"id": "1"}
+
+    class Session:
+        headers: dict = {}
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get(self, *args, **kwargs):
+            self.calls += 1
+            return Response(503) if self.calls < 3 else Response(200)
+
+    session = Session()
+    rest = DiscordRest("token", session=session)
+    assert rest.get_channel("123") == {"id": "1"}
+    assert session.calls == 3
+
+
+# ------------------------------- 再レビュー R-6: Discord追跡の終了後保持
+def test_discord_tracking_survives_until_end_plus_retention(tmp_path):
+    from pso2boost.state import State
+
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=None).replace(
+        tzinfo=__import__("pso2boost.tz", fromlist=["JST"]).JST
+    )
+    state = State(tmp_path / "state.json", now)
+    # updated は 40 日前でも、end が 5 日前なら追跡を残す
+    state.set_discord_event(
+        "k",
+        {"id": "ev1", "end": (now - __import__("datetime").timedelta(days=5)).isoformat()},
+    )
+    state._data["discord"]["k"]["updated"] = (
+        now - __import__("datetime").timedelta(days=40)
+    ).isoformat()
+
+    state.prune(days=30)
+    assert state.discord_event("k") is not None
