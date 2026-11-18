@@ -383,8 +383,12 @@ docs/shared-bot.md       # この設計書
 - **旧コールドスタート問題（解決済み・記録）**: 旧方式（HTTP Interactions）では
   インスタンス再確保の待ち時間が Discord の3秒制約を超えることがあった。
   `keep_alive` Timer の毎分 self-ping で workaround していたが、OAuth 移行で
-  問題の根源ごと消えた（§15）。なお deferReply（type 5）も検討したが、
-  ACK を出す前の遅延には効かないため採用しなかった。
+  問題の根源ごと消えた（§15）。
+- **deferReply（type 5）は不採用（実測で確認）**: deferReply 版をデプロイして
+  コールド状態で検証したところ、ACK の生成自体は**関数実行開始から 42ms**で
+  成功していたが、インスタンス起動待ちが3秒を食い潰し、クライアントは
+  タイムアウト表示のままだった。ACK をどれだけ速く返しても「関数が動き出す
+  前の待ち時間」は変えられないため、deferReply では解決しない。
 - **フェデレーション資格情報の Subject**: GitHub の OIDC トークンは
   `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>` 形式の `sub` を
   提示する（2026-11 実測。ID なしの旧形式では AADSTS700213 になる）。
