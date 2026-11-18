@@ -10,6 +10,7 @@ SDK を使うのは ``TableStore`` だけで、import も遅延する。
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,7 @@ log = logging.getLogger(__name__)
 
 GUILD_PARTITION = "guild"
 SHARED_PARTITION = "_shared"  # 全サーバー共有の RSS 既読などを置く予約パーティション
+SESSION_PARTITION = "_session"  # 設定フローのサーバー側セッション
 EVENT_ROW_PREFIX = "event:"
 RSS_ROW_PREFIX = "rss:"
 
@@ -295,6 +297,66 @@ class TableStore:
                 "last_run_at": now.isoformat(),
             },
         )
+
+    # -------------------------------------------------------------- sessions
+    def put_session(self, session_id: str, payload: dict, now: datetime) -> None:
+        """設定フローのサーバー側セッションを保存する（クッキーはIDだけ）。"""
+        self._service.upsert_entity(
+            self.state_table,
+            {
+                "PartitionKey": SESSION_PARTITION,
+                "RowKey": session_id,
+                "uid": str(payload.get("uid", "")),
+                "name": str(payload.get("name", "")),
+                "guilds": json.dumps(
+                    [str(guild) for guild in payload.get("guilds", [])]
+                ),
+                "exp": int(payload.get("exp") or 0),
+            },
+        )
+
+    def get_session(self, session_id: str, now: datetime) -> dict | None:
+        """有効なセッションを返す。期限切れは削除して None。"""
+        if not session_id:
+            return None
+        rows = self._service.list_entities(
+            self.state_table, query=f"PartitionKey eq '{SESSION_PARTITION}'"
+        )
+        for row in rows:
+            if str(row.get("RowKey", "")) != session_id:
+                continue
+            if int(row.get("exp") or 0) < int(now.timestamp()):
+                self._service.delete_entity(self.state_table, SESSION_PARTITION, session_id)
+                return None
+            try:
+                guilds = json.loads(row.get("guilds") or "[]")
+            except (TypeError, json.JSONDecodeError):
+                guilds = []
+            return {
+                "uid": str(row.get("uid", "")),
+                "name": str(row.get("name", "")),
+                "guilds": [str(guild) for guild in guilds],
+                "exp": int(row.get("exp") or 0),
+            }
+        return None
+
+    def delete_session(self, session_id: str) -> None:
+        if session_id:
+            self._service.delete_entity(self.state_table, SESSION_PARTITION, session_id)
+
+    def prune_sessions(self, now: datetime) -> int:
+        """期限切れのセッションを掃除する（週次バッチからも呼ぶ）。"""
+        rows = self._service.list_entities(
+            self.state_table, query=f"PartitionKey eq '{SESSION_PARTITION}'"
+        )
+        removed = 0
+        for row in rows:
+            if int(row.get("exp") or 0) < int(now.timestamp()):
+                self._service.delete_entity(
+                    self.state_table, SESSION_PARTITION, str(row.get("RowKey", ""))
+                )
+                removed += 1
+        return removed
 
     # ----------------------------------------------------------------- state
     def load_state(self, guild_id: str, now: datetime) -> State:

@@ -63,7 +63,6 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
         "client_secret": bool(config.client_secret),
-        "session_secret": bool(config.session_secret),
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
@@ -82,9 +81,10 @@ def setup_start(req: func.HttpRequest) -> func.HttpResponse:
 def setup_callback(req: func.HttpRequest) -> func.HttpResponse:
     """認可コードを受け取り、設定できるサーバー一覧を表示する。"""
     config = cloud_config.CloudConfig.from_env()
+    store = TableStore(config.storage_connection)
     return _response(
         setup_pages.callback(
-            config, query=dict(req.params), cookies=_cookies(req)
+            config, store, query=dict(req.params), cookies=_cookies(req)
         )
     )
 
@@ -94,9 +94,10 @@ def setup_callback(req: func.HttpRequest) -> func.HttpResponse:
 def setup_channels(req: func.HttpRequest) -> func.HttpResponse:
     """選んだサーバーのテキストチャンネル一覧を表示する。"""
     config = cloud_config.CloudConfig.from_env()
+    store = TableStore(config.storage_connection)
     return _response(
         setup_pages.channels(
-            config, query=dict(req.params), cookies=_cookies(req)
+            config, store, query=dict(req.params), cookies=_cookies(req)
         )
     )
 

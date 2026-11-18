@@ -1,12 +1,11 @@
 """cloud.setup_pages（OAuth 設定フローのページ）のテスト。"""
 
-import time
-
 from cloud import oauth, setup_pages
 from cloud.config import CloudConfig
 from cloud.discord import DiscordRestError
 from cloud.storage import TableStore
 from fakes import FakeTableService
+from pso2boost.tz import now_jst
 
 
 def make_config(**overrides) -> CloudConfig:
@@ -16,7 +15,6 @@ def make_config(**overrides) -> CloudConfig:
         host_name="pso2ngs-boost-bot.azurewebsites.net",
         client_id="1572407928101806202",
         client_secret="test-secret",
-        session_secret="session-secret",
     )
     values.update(overrides)
     return CloudConfig(**values)
@@ -28,11 +26,19 @@ def make_store() -> TableStore:
     return store
 
 
-def session_cookie(config: CloudConfig, guild_ids: list[str]) -> dict:
-    token = oauth.issue_session(
-        config.session_secret, user_id="42", username="でんぱ", guild_ids=guild_ids
+def session_cookie(store: TableStore, guild_ids: list[str]) -> dict:
+    session_id = oauth.make_session_id()
+    store.put_session(
+        session_id,
+        {
+            "uid": "42",
+            "name": "でんぱ",
+            "guilds": guild_ids,
+            "exp": oauth.session_expiry(),
+        },
+        now_jst(),
     )
-    return {setup_pages.SESSION_COOKIE: token}
+    return {setup_pages.SESSION_COOKIE: session_id}
 
 
 # ------------------------------------------------------------------ 1. 開始
@@ -91,6 +97,7 @@ def test_callback_rejects_state_mismatch():
     config = make_config()
     page = setup_pages.callback(
         config,
+        make_store(),
         query={"code": "abc", "state": "wrong"},
         cookies={setup_pages.STATE_COOKIE: "right"},
         session=FakeOAuthSession(),
@@ -99,8 +106,9 @@ def test_callback_rejects_state_mismatch():
     assert "状態の確認" in page.body
 
 
-def test_callback_lists_manageable_guilds_and_sets_session():
+def test_callback_lists_manageable_guilds_and_stores_session():
     config = make_config()
+    store = make_store()
     fake = FakeOAuthSession(
         guilds=[
             {"id": "111", "name": "BSMG", "permissions": str(oauth.MANAGE_GUILD)},
@@ -110,6 +118,7 @@ def test_callback_lists_manageable_guilds_and_sets_session():
 
     page = setup_pages.callback(
         config,
+        store,
         query={"code": "abc", "state": "right"},
         cookies={setup_pages.STATE_COOKIE: "right"},
         session=fake,
@@ -119,11 +128,12 @@ def test_callback_lists_manageable_guilds_and_sets_session():
     assert "BSMG" in page.body
     assert "一般鯖" not in page.body
     assert "guild_id=111" in page.body
-    # セッションクッキーに管理権限のあるサーバーだけ入れる
+    # クッキーは小さな ID だけで、中身は Table のサーバー側セッションにある
     cookie = page.headers["Set-Cookie"]
     assert cookie.startswith(f"{setup_pages.SESSION_COOKIE}=")
     token = cookie.split(";")[0].partition("=")[2]
-    payload = oauth.load_session(config.session_secret, token)
+    assert len(token) <= 64  # クッキー上限に対して余裕がある
+    payload = store.get_session(token, now_jst())
     assert payload["guilds"] == ["111"]
     assert payload["name"] == "でんぱ"
 
@@ -132,6 +142,7 @@ def test_callback_with_no_manageable_guilds():
     config = make_config()
     page = setup_pages.callback(
         config,
+        make_store(),
         query={"code": "abc", "state": "right"},
         cookies={setup_pages.STATE_COOKIE: "right"},
         session=FakeOAuthSession(guilds=[]),
@@ -142,6 +153,7 @@ def test_callback_with_no_manageable_guilds():
 def test_callback_handles_access_denied():
     page = setup_pages.callback(
         make_config(),
+        make_store(),
         query={"error": "access_denied"},
         cookies={},
         session=FakeOAuthSession(),
@@ -179,10 +191,12 @@ CHANNELS = {
 
 def test_channels_lists_text_channels_only():
     config = make_config()
+    store = make_store()
     page = setup_pages.channels(
         config,
+        store,
         query={"guild_id": "111"},
-        cookies=session_cookie(config, ["111", "999"]),
+        cookies=session_cookie(store, ["111", "999"]),
         discord=FakeBot(CHANNELS),
     )
     assert page.status == 200
@@ -193,10 +207,12 @@ def test_channels_lists_text_channels_only():
 
 def test_channels_rejects_guild_without_permission():
     config = make_config()
+    store = make_store()
     page = setup_pages.channels(
         config,
+        store,
         query={"guild_id": "222"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
     assert page.status == 403
@@ -204,10 +220,12 @@ def test_channels_rejects_guild_without_permission():
 
 def test_channels_shows_invite_when_bot_missing():
     config = make_config()
+    store = make_store()
     page = setup_pages.channels(
         config,
+        store,
         query={"guild_id": "111"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot({}, status=403),
     )
     assert page.status == 200
@@ -215,8 +233,31 @@ def test_channels_shows_invite_when_bot_missing():
     assert "guild_id=111" in page.body  # サーバー指定つきの招待 URL
 
 
+def test_channels_rejects_unknown_session():
+    page = setup_pages.channels(
+        make_config(), make_store(), query={"guild_id": "111"}, cookies={}
+    )
+    assert page.status == 403
+
+
 def test_channels_rejects_expired_session():
-    page = setup_pages.channels(make_config(), query={"guild_id": "111"}, cookies={})
+    config = make_config()
+    store = make_store()
+    import time
+
+    session_id = oauth.make_session_id()
+    store.put_session(
+        session_id,
+        {"uid": "42", "name": "x", "guilds": ["111"], "exp": int(time.time()) - 1},
+        now_jst(),
+    )
+    page = setup_pages.channels(
+        config,
+        store,
+        query={"guild_id": "111"},
+        cookies={setup_pages.SESSION_COOKIE: session_id},
+        discord=FakeBot(CHANNELS),
+    )
     assert page.status == 403
 
 
@@ -229,7 +270,7 @@ def test_save_validates_and_upserts():
         config,
         store,
         form={"guild_id": "111", "channel_id": "555"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
 
@@ -249,7 +290,7 @@ def test_save_rejects_other_guild_channel():
         config,
         store,
         form={"guild_id": "111", "channel_id": "888"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot({**CHANNELS, **other}),
     )
     assert "サーバー内のチャンネル" in page.body
@@ -264,7 +305,7 @@ def test_save_rejects_voice_channel():
         config,
         store,
         form={"guild_id": "111", "channel_id": "777"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
     assert "テキストチャンネル" in page.body
@@ -279,7 +320,7 @@ def test_save_rejects_missing_permission_in_session():
         config,
         store,
         form={"guild_id": "222", "channel_id": "555"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
     assert page.status == 403
@@ -293,13 +334,13 @@ def test_save_updates_existing_row():
     setup_pages.save(
         config, store,
         form={"guild_id": "111", "channel_id": "555"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
     page = setup_pages.save(
         config, store,
         form={"guild_id": "111", "channel_id": "556"},
-        cookies=session_cookie(config, ["111"]),
+        cookies=session_cookie(store, ["111"]),
         discord=FakeBot(CHANNELS),
     )
 

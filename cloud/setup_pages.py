@@ -6,7 +6,8 @@
 
 流れ:
 1. start        → Discord の認可画面へリダイレクト（state をクッキーに保存）
-2. callback     → コード交換 → 「サーバーを管理」できるサーバー一覧を表示
+2. callback     → コード交換 → 「サーバーを管理」できるサーバー一覧を表示。
+                  サーバー側セッション（Table）を作り、クッキーには ID だけ載せる
 3. channels     → 選んだサーバーのテキストチャンネル一覧を表示
 4. save         → 検証して Table へ保存 → 完了ページ
 """
@@ -117,6 +118,7 @@ def start(config: CloudConfig) -> Page:
 # -------------------------------------------------------------- 2. コールバック
 def callback(
     config: CloudConfig,
+    store: TableStore,
     *,
     query: dict,
     cookies: dict,
@@ -171,12 +173,21 @@ def callback(
         f"<ul>{items}</ul>"
         '<p class="note">通知先はこのあと選べます。毎週水曜 13:00 (JST) に通知します。</p>'
     )
-    token_value = oauth.issue_session(
-        config.session_secret,
-        user_id=str(user.get("id") or ""),
-        username=str(user.get("global_name") or user.get("username") or ""),
-        guild_ids=[str(g.get("id")) for g in manageable],
-    )
+    token_value = oauth.make_session_id()
+    try:
+        store.ensure_tables()
+        store.put_session(
+            token_value,
+            {
+                "uid": str(user.get("id") or ""),
+                "name": str(user.get("global_name") or user.get("username") or ""),
+                "guilds": [str(g.get("id")) for g in manageable],
+                "exp": oauth.session_expiry(),
+            },
+            now_jst(),
+        )
+    except Exception as exc:
+        return Page(200, _error_page(f"セッションの保存に失敗しました: {exc}"))
     return Page(
         200,
         render_page("サーバー設定", body),
@@ -187,12 +198,13 @@ def callback(
 # ------------------------------------------------------------------ 3. チャンネル
 def channels(
     config: CloudConfig,
+    store: TableStore,
     *,
     query: dict,
     cookies: dict,
     discord: DiscordRest | None = None,
 ) -> Page:
-    payload = oauth.load_session(config.session_secret, cookies.get(SESSION_COOKIE, ""))
+    payload = store.get_session(cookies.get(SESSION_COOKIE, ""), now_jst())
     if payload is None:
         return Page(403, _error_page("セッションの有効期限が切れています。"))
 
@@ -249,7 +261,7 @@ def save(
     cookies: dict,
     discord: DiscordRest | None = None,
 ) -> Page:
-    payload = oauth.load_session(config.session_secret, cookies.get(SESSION_COOKIE, ""))
+    payload = store.get_session(cookies.get(SESSION_COOKIE, ""), now_jst())
     if payload is None:
         return Page(403, _error_page("セッションの有効期限が切れています。"))
 
