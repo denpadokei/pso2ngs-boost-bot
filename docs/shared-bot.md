@@ -172,7 +172,103 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications
 
 週1回・数十サーバーなら **0〜10円/月**。100万実行 / 400,000 GB-s の無料枠に対して誤差。
 
-## 10. リポジトリ構成（追加分）
+## 10. デプロイ（GitHub Actions / OIDC）
+
+Azure への配置も GitHub Actions で行う。認証は **OIDC**（公開プロファイル不要）。
+`main` へ push すると自動デプロイ、手動実行も可能にする。
+
+### Azure 側の準備（1回だけ）
+
+1. ユーザー割り当てマネージド ID を作成
+2. その ID に、関数アプリスコープで **Website Contributor** を付与
+3. フェデレーション資格情報を作成（GitHub / 組織 / リポジトリ / ブランチ `main`）
+4. リポジトリ変数（Secrets ではなく Variables）に登録
+
+| 変数 | 値 |
+| --- | --- |
+| `AZURE_CLIENT_ID` | マネージド ID のクライアント ID |
+| `AZURE_TENANT_ID` | テナント ID |
+| `AZURE_SUBSCRIPTION_ID` | サブスクリプション ID |
+| `AZURE_FUNCTIONAPP_NAME` | 関数アプリ名（未設定ならデプロイをスキップ） |
+
+`AZURE_FUNCTIONAPP_NAME` を空にしておけば、ワークフローは失敗せずスキップする。
+Azure 側の準備ができてから設定する。
+
+### ワークフロー
+
+```yaml
+name: deploy-cloud
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "function_app.py"
+      - "host.json"
+      - "cloud/**"
+      - "pso2boost/**"
+      - "cloud/requirements.txt"
+      - ".github/workflows/deploy-cloud.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloud
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    if: vars.AZURE_FUNCTIONAPP_NAME != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build package
+        run: |
+          mkdir -p build
+          cp function_app.py host.json build/
+          cp -r pso2boost cloud build/
+          python -m pip install -r cloud/requirements.txt \
+            --target build/.python_packages/lib/site-packages
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+          package: build
+```
+
+### 依存関係の入れ方
+
+OIDC + パッケージデプロイでは remote build に頼らず、**依存を同梱**する。
+`pip install --target build/.python_packages/lib/site-packages` は Linux の
+Consumption プランでサポートされている配置方法。
+
+- 自己ホスト用の `requirements.txt` は軽いまま（`azure-functions` を入れない）
+- Functions 用は `cloud/requirements.txt` に分ける
+- ローカルで `azure-functions` を入れたくない人に影響しない
+
+### 運用
+
+- デプロイ後の確認: `curl https://<app>.azurewebsites.net/api/health`（Phase 1 で追加）
+- ロールバック: 直前のコミットを revert して再デプロイ（Consumption はスロット2つまで）
+- 失敗時: Actions のログと `last_error` を見る。関数アプリ側は Application Insights 任意
+- 本番承認を挟む場合は GitHub Environments を使う。その場合フェデレーション資格情報の
+  subject を `environment:production` に合わせる
+
+## 11. リポジトリ構成（追加分）
 
 ```
 function_app.py          # Timer / HTTP の入口（薄く保つ）
@@ -184,7 +280,9 @@ cloud/
   storage.py             # Table アクセス
   runner.py              # 週次バッチ
   commands.py            # コマンド登録スクリプト
+  requirements.txt       # Functions 用（azure-functions, azure-data-tables）
 pso2boost/               # 既存（そのまま再利用）
+.github/workflows/deploy-cloud.yml   # OIDC デプロイ
 docs/shared-bot.md       # この設計書
 ```
 
@@ -194,23 +292,23 @@ docs/shared-bot.md       # この設計書
 - CLI とクラウドで同じ判定を使う（通知文言・リマインド条件の二重実装を避ける）
 - `DiscordNotifier` は Bot 投稿に対応済み。`ScheduledEventsApi` もそのまま使える
 
-## 11. 実装フェーズ
+## 12. 実装フェーズ
 
 | Phase | 内容 | 完了条件 |
 | --- | --- | --- |
 | 0 | `plan_actions` 抽出・テスト | CLI の挙動が変わらず全テスト green |
-| 1 | Azure 最小構成（Timer → 1サーバー） | テスト鯖でイベント作成と投稿 |
+| 1 | Azure 最小構成（Timer → 1サーバー）＋ `deploy-cloud.yml` | push でデプロイされ、テスト鯖でイベント作成と投稿 |
 | 2 | `/setup` + Table + 複数サーバー | 2サーバーで別チャンネルに通知 |
 | 3 | 権限チェック・レート制限・削除・監視 | 片方の失敗が他方に影響しない |
 | 4 | `/status` `/disable`、メンションロール | 運用が回る |
 
-## 12. テスト方針
+## 13. テスト方針
 
 - **単体**: `plan_actions`（新着/開始/終了/変更/削除）、署名検証（既知のテストベクタ）、`/setup` ハンドラ（Fake Table）
 - **結合**: Timer を `--dry-run` 相当で実行し、1サーバー分のアクションを検証
 - **手動**: `func start` + テスト鯖で `/setup` → Timer 手動実行
 
-## 13. 決めたいこと
+## 14. 決めたいこと
 
 1. 通知先は**1サーバー1チャンネル固定**でよいか（MVP は固定）
 2. `/setup role:` でメンションロールを設定できるようにするか（Phase 4）
@@ -218,7 +316,7 @@ docs/shared-bot.md       # この設計書
 4. 100サーバー超の Bot 認証まで目指すか
 5. 実行時刻は水曜 13:00 JST 固定でよいか
 
-## 14. OAuth を使わない理由
+## 15. OAuth を使わない理由
 
 - 設定は `/setup` 1回で済み、Web UI が不要
 - コールバック URL・セッション・CSRF 対策・トークン更新を持たなくてよい
