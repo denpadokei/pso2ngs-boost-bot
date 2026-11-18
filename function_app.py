@@ -17,6 +17,7 @@ import azure.functions as func
 
 from cloud import config as cloud_config
 from cloud import runner, setup_pages
+from cloud.setup_pages import ERROR_MARKER
 from cloud.storage import TableStore
 
 app = func.FunctionApp()
@@ -33,9 +34,13 @@ def _cookies(req: func.HttpRequest) -> dict:
 
 
 def _response(page: setup_pages.Page) -> func.HttpResponse:
+    status = page.status
+    # 業務エラーページは HTTP でもエラーを表現する（監視で成功に見えないように）
+    if status == 200 and page.body.startswith(ERROR_MARKER):
+        status = 500
     return func.HttpResponse(
         page.body,
-        status_code=page.status,
+        status_code=status,
         headers=page.headers,
         mimetype="text/html" if page.body else None,
         charset="utf-8" if page.body else None,
@@ -58,8 +63,11 @@ def weekly_sync(timer: func.TimerRequest) -> None:
 def health(req: func.HttpRequest) -> func.HttpResponse:
     """デプロイ確認用。設定の有無だけ返す（秘密は含めない）。"""
     config = cloud_config.CloudConfig.from_env()
+    configured = bool(
+        config.bot_token and config.storage_connection and config.client_secret
+    )
     body = {
-        "status": "ok",
+        "status": "ok" if configured else "degraded",
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
         "client_secret": bool(config.client_secret),

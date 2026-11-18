@@ -36,6 +36,7 @@ from pso2boost.tz import now_jst
 
 STATE_COOKIE = "pso2state"
 SESSION_COOKIE = "pso2session"
+ERROR_MARKER = "<!-- error -->"  # エラーページを HTTP ステータスに変換するための印
 
 
 class Page:
@@ -86,7 +87,7 @@ def render_page(title: str, body: str) -> str:
 def _error_page(message: str) -> str:
     return render_page(
         "エラー",
-        f"<h1>⚠️ {html.escape(message)}</h1>"
+        f"{ERROR_MARKER}<h1>⚠️ {html.escape(message)}</h1>"
         '<p class="note">しばらくしてからもう一度お試しください。</p>',
     )
 
@@ -132,7 +133,13 @@ def callback(
     session = session or requests.Session()
 
     if query.get("error"):
-        return Page(200, _error_page("認可がキャンセルされました。"))
+        error = str(query.get("error"))
+        messages = {
+            "access_denied": "認可が拒否されました。許可する場合はもう一度お試しください。",
+            "login_required": "Discord にログインしてからもう一度お試しください。",
+            "consent_required": "このアプリへの初回認可が必要です。もう一度お試しください。",
+        }
+        return Page(200, _error_page(messages.get(error, f"認可に失敗しました: {error}")))
 
     state = str(query.get("state") or "")
     if not state or state != cookies.get(STATE_COOKIE):
@@ -345,12 +352,21 @@ def sync_now(
         + "</li>"
         for d in getattr(summary, "details", [])
     )
+    status = getattr(summary, "status", "ok")
+    headline = "✅ 同期が完了しました" if status == "ok" else (
+        "⏭️ 同期をスキップしました" if status == "skipped" else "⚠️ 同期に問題がありました"
+    )
+    notes = "".join(
+        f"<li class='error'>{html.escape(str(action))}</li>"
+        for action in getattr(summary, "actions", [])
+    )
     body = (
-        "<h1>✅ 同期が完了しました</h1>"
+        f"<h1>{headline}</h1>"
         f"<p>通知 {summary.notified} / イベント作成 {summary.created} / "
         f"更新 {summary.updated} / 削除 {summary.deleted}"
         + (f" / 失敗 {summary.failed}" if getattr(summary, "failed", 0) else "")
         + "</p>"
+        + (f"<ul class='error'>{notes}</ul>" if notes else "")
         + (f"<ul>{rows}</ul>" if rows else "")
         + '<p class="note"><a href="/api/setup">設定ページへ戻る</a></p>'
     )
@@ -390,7 +406,14 @@ def save(
     permission_info = _bot_permissions(discord, guild_id)
     permissions_ok = True
     warning = ""
-    if permission_info is not None:
+    if permission_info is None:
+        # 確認できなかったのに True と捏造すると、403 が黙って繰り返される
+        permissions_ok = False
+        warning = (
+            "⚠️ Bot の権限を確認できませんでした。"
+            "通知が届かない可能性があります（チャンネル権限をご確認ください）。"
+        )
+    else:
         role_ids, roles = permission_info
         perms = compute_channel_permissions(
             guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
