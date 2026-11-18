@@ -34,7 +34,7 @@ from pso2boost.sync import sync_events
 from pso2boost.tz import now_jst
 
 from .config import CloudConfig
-from .interactions import DiscordRest, DiscordRestError
+from .discord import DiscordRest, DiscordRestError
 from .storage import GuildConfig, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)

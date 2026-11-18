@@ -12,7 +12,7 @@ from pso2boost.fetch import FetchError
 
 
 class FakeDiscordRest:
-    """cloud.interactions.DiscordRest の代わり。ギルドごとに HTTP ステータスを返す。"""
+    """cloud.discord.DiscordRest の代わり。ギルドごとに HTTP ステータスを返す。"""
 
     def __init__(self, guild_status: dict[str, int] | None = None) -> None:
         self.guild_status = guild_status or {}
@@ -20,7 +20,7 @@ class FakeDiscordRest:
     def get_guild(self, guild_id: str) -> dict:
         status = self.guild_status.get(guild_id, 200)
         if status >= 400:
-            from cloud.interactions import DiscordRestError
+            from cloud.discord import DiscordRestError
 
             raise DiscordRestError(f"HTTP {status}: Unknown Guild", status_code=status)
         return {"id": guild_id}

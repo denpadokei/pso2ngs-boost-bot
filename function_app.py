@@ -2,20 +2,44 @@
 
 ロジックは cloud/ と pso2boost/ に置き、ここは薄く保つ。
 
-注意: defer-try ブランチでは keep-alive を意図的に外している。
-コールドスタート条件下での deferReply の挙動を実測するため。
+- weekly_sync: 毎週水曜 04:00 UTC（= 13:00 JST）の週次バッチ
+- health: デプロイ確認用
+- setup 系: OAuth 設定フロー（旧 /setup コマンドの代替。
+  ブラウザ経由なので Discord の3秒制約を受けない）
 """
 
 from __future__ import annotations
 
 import json
+from urllib.parse import parse_qs
 
 import azure.functions as func
 
 from cloud import config as cloud_config
-from cloud import interactions, runner
+from cloud import runner, setup_pages
+from cloud.storage import TableStore
 
 app = func.FunctionApp()
+
+
+def _cookies(req: func.HttpRequest) -> dict:
+    raw = req.headers.get("Cookie") or ""
+    result: dict[str, str] = {}
+    for part in raw.split(";"):
+        name, _, value = part.strip().partition("=")
+        if name:
+            result[name] = value
+    return result
+
+
+def _response(page: setup_pages.Page) -> func.HttpResponse:
+    return func.HttpResponse(
+        page.body,
+        status_code=page.status,
+        headers=page.headers,
+        mimetype="text/html" if page.body else None,
+        charset="utf-8" if page.body else None,
+    )
 
 
 @app.timer_trigger(
@@ -38,25 +62,55 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "status": "ok",
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
-        "public_key": bool(config.public_key),
+        "client_secret": bool(config.client_secret),
+        "session_secret": bool(config.session_secret),
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
     )
 
 
-@app.function_name(name="interactions")
-@app.route(route="interactions", auth_level=func.AuthLevel.ANONYMOUS)
-def discord_interactions(req: func.HttpRequest) -> func.HttpResponse:
-    """Discord の HTTP Interactions（PING / /setup）。"""
+@app.function_name(name="setup_start")
+@app.route(route="setup", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_start(req: func.HttpRequest) -> func.HttpResponse:
+    """設定フローの入口。Discord の認可画面へリダイレクトする。"""
+    return _response(setup_pages.start(cloud_config.CloudConfig.from_env()))
+
+
+@app.function_name(name="setup_callback")
+@app.route(route="setup/callback", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_callback(req: func.HttpRequest) -> func.HttpResponse:
+    """認可コードを受け取り、設定できるサーバー一覧を表示する。"""
     config = cloud_config.CloudConfig.from_env()
-    status, body = interactions.handle_interaction(
-        body=req.get_body(),
-        headers=req.headers,
-        config=config,
+    return _response(
+        setup_pages.callback(
+            config, query=dict(req.params), cookies=_cookies(req)
+        )
     )
-    return func.HttpResponse(
-        json.dumps(body, ensure_ascii=False),
-        status_code=status,
-        mimetype="application/json",
+
+
+@app.function_name(name="setup_channels")
+@app.route(route="setup/channels", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_channels(req: func.HttpRequest) -> func.HttpResponse:
+    """選んだサーバーのテキストチャンネル一覧を表示する。"""
+    config = cloud_config.CloudConfig.from_env()
+    return _response(
+        setup_pages.channels(
+            config, query=dict(req.params), cookies=_cookies(req)
+        )
+    )
+
+
+@app.function_name(name="setup_save")
+@app.route(route="setup/save", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_save(req: func.HttpRequest) -> func.HttpResponse:
+    """通知先チャンネルを検証して Table へ保存する。"""
+    config = cloud_config.CloudConfig.from_env()
+    form = {
+        key: values[-1]
+        for key, values in parse_qs(req.get_body().decode("utf-8")).items()
+    }
+    store = TableStore(config.storage_connection)
+    return _response(
+        setup_pages.save(config, store, form=form, cookies=_cookies(req))
     )

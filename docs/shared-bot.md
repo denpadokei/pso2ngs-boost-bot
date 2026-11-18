@@ -1,10 +1,14 @@
-# 共有Bot設計（OAuth なし・Azure Functions）
+# 共有Bot設計（OAuth 設定フロー・Azure Functions）
 
-複数サーバーに1つの Bot を配る場合の設計。**OAuth を使わず**、`/setup` スラッシュコマンドと
+複数サーバーに1つの Bot を配る場合の設計。サーバーごとの通知先は
+**OAuth2 認可による Web 設定フロー**で行い、通知・イベント作成は
 週1回の Timer だけで完結させる。
 
 - 対象: このリポジトリの `pso2boost` を再利用する共有運用
 - 前提: 各自が自分の Bot を動かすセルフホスト配布（テンプレート）はそのまま残す
+- 経緯: 2026-11 までは HTTP Interactions（`/setup` スラッシュコマンド）を使っていたが、
+  **Discord の「3秒以内の応答」制約がスケールゼロのサーバーレスと相性不良**だったため
+  OAuth 方式へ移行した（詳細は §15）
 
 ## 1. 目的と非目的
 
@@ -26,18 +30,21 @@
 
 ```mermaid
 flowchart LR
-  U[サーバー管理者] -->|招待 scope=bot applications.commands| D[Discord]
-  U -->|/setup #channel| D
-  D -->|Interactions POST| F[Azure Functions HTTP]
-  F -->|署名検証・保存| T[(Table Storage)]
-  T --> F
+  U[サーバー管理者] -->|Bot 招待 scope=bot| D[Discord]
+  U -->|設定ページ| W[Functions Web]
+  W -->|OAuth2 認可| D
+  D -->|redirect + code| W
+  W -->|guilds/channels 取得| D
+  W -->|保存| T[(Table Storage)]
+  T --> W
   C[Timer 週1] --> F2[Functions Timer]
   F2 -->|PSO2 データを1回取得| P[pso2.jp]
   F2 -->|サーバーごとに同期| D
   F2 --> T
 ```
 
-- Discord → Functions は **HTTP Interactions**（Gateway 不要）
+- 設定フローは **ブラウザ経由の OAuth2**（ブラウザは待てるので応答時間の
+  ハード制約が無い。旧方式の HTTP Interactions は3秒制約があった）
 - 定期実行は **Timer trigger**（水曜 04:00 UTC = 13:00 JST）
 - 状態は **Table Storage**（サーバーごとにパーティション）
 
@@ -45,29 +52,18 @@ flowchart LR
 
 | 項目 | 値 |
 | --- | --- |
-| Scopes | `bot`, `applications.commands` |
-| Permissions | イベントの作成 / イベントの管理 / メッセージを送信 / チャンネルを見る |
-| Interactions Endpoint URL | `https://<function-app>.azurewebsites.net/api/interactions` |
+| Bot 招待の Scopes | `bot`（権限はイベント作成・管理・投稿・閲覧） |
+| 設定フローの Scopes | `identify guilds`（OAuth2 Redirect URI の登録が必要） |
+| Redirect URI | `https://<function-app>.azurewebsites.net/api/setup/callback` |
 | Bot 認証 | 100サーバー超で必要（申請） |
 
-招待 URL:
+Bot 招待 URL:
 
 ```
-https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications.commands&permissions=17600775982080
+https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=17600775982080
 ```
 
-コマンドはグローバル登録（伝播に最大1時間）。開発中は `DISCORD_DEV_GUILD_ID` に
-ギルドコマンドとして登録すると即時反映される。
-
-### コマンド定義
-
-| コマンド | オプション | 説明 |
-| --- | --- | --- |
-| `/setup` | `channel`（必須）, `role`（任意） | 通知先を登録・更新 |
-| `/status` | なし | 現在の設定と次回実行を表示（Phase 4） |
-| `/disable` | なし | 通知を停止（Phase 4） |
-
-`default_member_permissions` に `MANAGE_GUILD` を設定し、サーバー側でも再確認する。
+スラッシュコマンドは使わない（旧 `/setup` は廃止。コマンド登録は不要）。
 
 ## 4. データモデル（Table Storage）
 
@@ -102,20 +98,24 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications
 
 ## 5. 処理フロー
 
-### `/setup`
+### 設定フロー（OAuth2）
 
-1. 署名検証（Ed25519、`X-Signature-Ed25519` / `X-Signature-Timestamp`）
-2. `PING`（type 1）なら `{"type": 1}` を返す
-3. `APPLICATION_COMMAND`（type 2）で `setup` 以外は無視
-4. 実行者に `MANAGE_GUILD` があるか確認（なければ ephemeral で拒否）
-5. チャンネルを `GET /channels/{id}` で検証（type 0/5）
-6. Bot の権限を確認（不足なら警告を返しつつ保存はする）
-7. `guilds` を upsert
-8. 3秒以内に ephemeral 応答
+1. サーバー管理者が `https://<function-app>.azurewebsites.net/api/setup` を開く
+2. Discord の認可画面（scope: `identify guilds`）で許可 → コールバックへ
+   - CSRF 対策: `state` をランダム生成し、クッキーとクエリで照合
+3. アクセストークンと **コードを1回だけ交換して使う**（保存しない →
+   リフレッシュトークン管理は不要）
+4. 「サーバーを管理」権限のあるサーバー一覧を表示して選択
+   - 権限は OAuth の `guilds` レスポンスの `permissions` で判定
+   - 選択可能なサーバーIDを **15分有効の HMAC 署名付きクッキー** に保存
+     （サーバー側にセッション状態を持たない）
+5. 選んだサーバーのテキストチャンネル一覧を **Bot トークン** で取得して表示
+   - Bot が未参加のサーバーなら、そのサーバー指定つきの招待 URL を案内
+6. チャンネルを選んで保存 → `guilds` テーブルへ upsert → 完了ページ
 
 ```
 ✅ 通知先を #テスト に設定しました
-次回実行: 2026-11-25 13:00 (JST)
+毎週水曜 13:00 (JST) にブーストキャンペーンの通知とイベント作成を行います。
 ```
 
 ### 週次 Timer
@@ -155,10 +155,11 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications
 
 ## 8. セキュリティ
 
-- Interactions は毎回署名検証。失敗は 401
-- コマンドは `MANAGE_GUILD` のみ
-- Bot トークン / Public Key はアプリ設定（Key Vault は任意）
+- 設定フローは OAuth2 認可 + `state` 照合（CSRF 対策）＋ 15分有効の署名付きセッション
+- 設定可能なのは `MANAGE_GUILD` を持つユーザーだけ（OAuth の permissions で判定）
+- Bot トークン / クライアントシークレット / セッション鍵はアプリ設定（Key Vault は任意）
 - 保存するのは `guild_id` / `channel_id` / イベント ID のみ。メッセージ内容やユーザー情報は保存しない
+  （設定フローのユーザーアクセストークンもコールバックで1回使うだけで保存しない）
 - Azure 側は Managed Identity + Storage の RBAC も選択可（MVP は接続文字列）
 
 ## 9. Azure リソースと費用
@@ -286,10 +287,11 @@ host.json
 cloud/
   __init__.py
   config.py              # 環境変数
-  interactions.py        # 署名検証・/setup
+  oauth.py               # OAuth2 認可・コード交換・署名セッション
+  setup_pages.py         # 設定フローの HTML（start/callback/channels/save）
+  discord.py             # Bot トークン用の最小 REST クライアント
   storage.py             # Table アクセス
   runner.py              # 週次バッチ
-  commands.py            # コマンド登録スクリプト
   requirements.txt       # Functions 用（azure-functions, azure-data-tables）
 pso2boost/               # 既存（そのまま再利用）
 .github/workflows/deploy-cloud.yml   # OIDC デプロイ
@@ -326,12 +328,27 @@ docs/shared-bot.md       # この設計書
 4. 100サーバー超の Bot 認証まで目指すか
 5. 実行時刻は水曜 13:00 JST 固定でよいか
 
-## 15. OAuth を使わない理由
+## 15. HTTP Interactions から OAuth への移行（2026-11 実測）
 
-- 設定は `/setup` 1回で済み、Web UI が不要
-- コールバック URL・セッション・CSRF 対策・トークン更新を持たなくてよい
-- 権限は Discord 側のコマンド権限（`MANAGE_GUILD`）で制御できる
-- どうしても Web 設定が必要になった段階で、後から OAuth を足せる
+当初は「OAuth を使わない」設計（`/setup` スラッシュコマンド + HTTP Interactions）
+だったが、実運用で **技術選定の誤り** が判明したため移行した。
+
+- HTTP Interactions には Discord 側の **3秒以内の応答** というハード制約がある
+- Flex 従量課金（スケールゼロ）では、リクエスト到着前の **インスタンス再確保の
+  待ち時間**（Azure のリクエスト遥測に現れない）がしばしば3秒を超えた
+- 実測: サーバー内処理は約0.6〜1秒、ウォーム時の往復は0.1秒前後。
+  タイムアウト時も保存自体は成功していたが、「✅」が表示されない UX 問題が残った
+- 毎分の self-ping でインスタンスを温存する workaround も可能だが、
+  「サーバーレスをサーバーレスでなくする小細工」であり設計の崩れだった
+
+**OAuth 方式ではこの制約が構造的に消える**: 設定はユーザーのブラウザで行われ、
+ブラウザは数秒の待ち時間に寛容だから。セルフホスト配布（テンプレート）と
+週次バッチ部分は一切変わらない。
+
+- ユーザーアクセストークンはコールバックで1回だけ使う（保存しない）ため、
+  当初懸念していた「トークン更新の管理」は実質不要になった
+- 旧 `/setup` コマンド・interactions エンドポイント・keep-alive・コマンド登録は
+  すべて廃止した
 
 ## 16. 実装メモ（2026-11 実装時の判断）
 
@@ -349,14 +366,9 @@ docs/shared-bot.md       # この設計書
   HTTP は準備フェーズをメインスレッドで直列に実行し、ワーカーは Discord API だけ。
 - **Phase 1 のフォールバック**: guilds テーブルに登録がなければ環境変数
   `DISCORD_GUILD_ID` / `DISCORD_CHANNEL_ID` の1サーバーを対象にする
-  （このサーバーの `last_error` はログのみ）。`/setup` による登録があればそちら優先。
-- **/setup の Bot 権限確認**: インタラクションの `app_permissions`（ギルド単位）から
-  判定し、不足なら警告を添えて保存する。チャンネル毎の上書きは週次実行時の
-  送信成否が `last_error` に残るため、そちらで気づける。
+  （このサーバーの `last_error` はログのみ）。設定フローによる登録があればそちら優先。
 - **キック検出**: `GET /guilds/{id}` が 404/403 のときだけ `enabled=false`。
   429/5xx/ネットワークエラーでは無効化しない。
-- **コマンド登録**: `python -m cloud.commands`（`DISCORD_BOT_TOKEN` /
-  `DISCORD_APPLICATION_ID` 必須、`DISCORD_DEV_GUILD_ID` でギルドコマンド化）。
 - **デプロイ方式**: 依存の同梱（`pip install --target .python_packages`）ではなく
   **リモートビルド（Oryx）** を使う。Flex Consumption の Python は公式に
   「remote build を使え」とされており、従来の Consumption でもリモートビルドは
@@ -366,16 +378,17 @@ docs/shared-bot.md       # この設計書
   `Azure/functions-action` に渡すビルドフラグを切り替える
   （Flex: `remote-build`、従来: `scm-do-build-during-deployment` ＋ `enable-oryx-build`）。
 - **インスタンスサイズ**: Flex Consumption で選択する場合は 2048MB（既定）で十分。
-  このワークロード（週1回・数分のバッチ + 低頻度の `/setup`）の実使用メモリは
+  このワークロード（週1回・数分のバッチ + 低頻度の設定ページ）の実使用メモリは
   200MB 程度に収まる。
-- **コールドスタート対策**: Flex はアイドルでスケールゼロになるため、
-  `/setup` の初回応答が Discord の3秒制限を超えることがある（実測: サーバー内
-  処理は約1秒でも、インスタンス再確保の待ち時間が Discord 側で「応答なし」
-  表示になる。なお保存自体は成功し、表示だけの問題）。`keep_alive` Timer が
-  **毎分** self-ping（/api/health ＋ /api/interactions の空 POST）で http
-  関数グループを温存する（実測でウォーム時往復 0.1〜0.3秒、インスタンス生存は
-  分単位だったため）。実行回数は月9万弱で無料枠内。それでも間に合わない
-  場合は always-ready インスタンス（有料）を検討する。
+- **旧コールドスタート問題（解決済み・記録）**: 旧方式（HTTP Interactions）では
+  インスタンス再確保の待ち時間が Discord の3秒制約を超えることがあった。
+  `keep_alive` Timer の毎分 self-ping で workaround していたが、OAuth 移行で
+  問題の根源ごと消えた（§15）。
+- **deferReply（type 5）は不採用（実測で確認）**: deferReply 版をデプロイして
+  コールド状態で検証したところ、ACK の生成自体は**関数実行開始から 42ms**で
+  成功していたが、インスタンス起動待ちが3秒を食い潰し、クライアントは
+  タイムアウト表示のままだった。ACK をどれだけ速く返しても「関数が動き出す
+  前の待ち時間」は変えられないため、deferReply では解決しない。
 - **フェデレーション資格情報の Subject**: GitHub の OIDC トークンは
   `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>` 形式の `sub` を
   提示する（2026-11 実測。ID なしの旧形式では AADSTS700213 になる）。
