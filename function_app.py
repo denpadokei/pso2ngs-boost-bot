@@ -8,11 +8,38 @@ from __future__ import annotations
 import json
 
 import azure.functions as func
+import requests
 
 from cloud import config as cloud_config
 from cloud import interactions, runner
 
 app = func.FunctionApp()
+
+
+@app.timer_trigger(
+    arg_name="timer",
+    schedule="0 */4 * * * *",  # 4分ごと
+    run_on_startup=False,
+    use_monitor=True,
+)
+def keep_alive(timer: func.TimerRequest) -> None:
+    """HTTP 関数のインスタンスを温存して /setup を3秒以内に応答させる。
+
+    Flex 従量課金はアイドルでスケールゼロになり、コールドスタートが
+    Discord の応答期限（3秒）を超えることがある。自分自身の /api/health
+    を呼ぶことで http 関数グループのインスタンスを確保しておく。
+    （/setup の保存自体はコールドスタートでも成功するが、ephemeral
+    応答が Discord 側で「応答なし」表示になるのを防ぐため）
+    """
+    import os
+
+    hostname = os.environ.get("WEBSITE_HOSTNAME", "")
+    if not hostname:
+        return
+    try:
+        requests.get(f"https://{hostname}/api/health", timeout=10)
+    except requests.RequestException:
+        pass  # 失敗しても次のタイマーで再試行するだけなので無視
 
 
 @app.timer_trigger(
