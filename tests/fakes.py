@@ -76,10 +76,14 @@ class FakeApi:
         self.created: list[dict] = []
         self.updated: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
+        self.existing: list[dict] = []
         self._counter = 0
 
     def event_url(self, event_id: str) -> str:
         return f"https://discord.com/events/{self.guild_id}/{event_id}"
+
+    def list(self) -> list[dict]:
+        return list(self.existing)
 
     def create(self, **kwargs) -> str:
         self._counter += 1

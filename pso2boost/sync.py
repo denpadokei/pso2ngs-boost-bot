@@ -1,6 +1,8 @@
 """ブースト予定と Discord のスケジュールイベントを同期する。
 
-- 新規: 期間が未来ならイベントを作成
+- 新規: 期間が未来ならイベントを作成。ただし Discord 側に同名・同時刻の
+  イベントが既にある場合は作成せず再利用する（state が失われた場合や、
+  セルフホスト版など別経路で作られたイベントとの重複を防ぐ）
 - 変更: 名前・期間・場所・説明が変わったら更新
 - 終了: 終了から一定日数たったら削除（履歴を残しすぎない）
 
@@ -13,7 +15,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .discord_events import DiscordApiError, ScheduledEventsApi
 from .models import BoostEvent
@@ -22,6 +24,9 @@ from .state import State
 log = logging.getLogger(__name__)
 
 DEFAULT_RETENTION_DAYS = 7
+
+# 重複確認で「同じイベント」とみなす開始時刻の許容差（秒）
+_DUPLICATE_START_TOLERANCE = 1.0
 
 
 @dataclass
@@ -78,6 +83,43 @@ def build_payload(event: BoostEvent, now: datetime) -> tuple[dict, str] | None:
     return payload, signature
 
 
+def _parse_discord_time(value) -> datetime | None:
+    """Discord が返す ISO8601（Z 付きを含む）を datetime にする。"""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def find_duplicate(events: list[dict], payload: dict) -> dict | None:
+    """既存イベント一覧から、同じ名前・同じ開始時刻のものを探す。
+
+    name と scheduled_start_time の一致で判定する（開始時刻が同じなら
+    同じキャンペーン）。終了済み・キャンセル済みは対象外。
+    """
+    name = str(payload.get("name") or "")
+    start = payload.get("start")
+    if not name or not isinstance(start, datetime):
+        return None
+
+    for candidate in events:
+        if not isinstance(candidate, dict):
+            continue
+        if str(candidate.get("status") or "").lower() in {"completed", "canceled"}:
+            continue
+        if str(candidate.get("name") or "") != name:
+            continue
+        existing_start = _parse_discord_time(candidate.get("scheduled_start_time"))
+        if existing_start is None:
+            continue
+        if abs((existing_start - start).total_seconds()) <= _DUPLICATE_START_TOLERANCE:
+            return candidate
+    return None
+
+
 def sync_events(
     events: list[BoostEvent],
     state: State,
@@ -88,6 +130,19 @@ def sync_events(
     retention_days: int = DEFAULT_RETENTION_DAYS,
 ) -> SyncResult:
     result = SyncResult()
+
+    existing_cache: list[dict] | None = None
+
+    def existing_events() -> list[dict]:
+        """既存イベント一覧を1回だけ取得する（失敗時は空で続行）。"""
+        nonlocal existing_cache
+        if existing_cache is None:
+            try:
+                existing_cache = api.list()
+            except DiscordApiError as exc:
+                log.warning("Discord 側の既存イベントを取得できませんでした: %s", exc)
+                existing_cache = []
+        return existing_cache
 
     for event in events:
         entry = state.discord_event(event.key)
@@ -119,7 +174,35 @@ def sync_events(
         payload, signature = built
 
         if entry is None:
-            if dry_run:
+            duplicate = find_duplicate(existing_events(), payload)
+            if duplicate is not None:
+                # 状態が失われた場合や、別経路（セルフホスト版など）で作られた
+                # 同名・同時刻のイベントと重複しないよう、既存を再利用する
+                if dry_run:
+                    log.info(
+                        "[dry-run] 既存イベントを再利用: %s（作成しない）",
+                        payload["name"],
+                    )
+                    result.skipped += 1
+                    result.links[event.key] = api.event_url(str(duplicate.get("id")))
+                    continue
+                log.warning(
+                    "Discord 側に同名・同時刻のイベントがあるため再利用します: %s",
+                    payload["name"],
+                )
+                state.set_discord_event(
+                    event.key,
+                    {
+                        "id": str(duplicate.get("id")),
+                        # 内容は下の更新パスで合わせる（署名不一致にする）
+                        "signature": "",
+                        "name": payload["name"],
+                        "end": payload["end"].isoformat(),
+                    },
+                )
+                entry = state.discord_event(event.key)
+
+            elif dry_run:
                 log.info(
                     "[dry-run] イベント作成: %s (%s ～ %s)",
                     payload["name"],
@@ -128,25 +211,26 @@ def sync_events(
                 )
                 result.created += 1
                 continue
-            try:
-                event_id = api.create(**payload)
-            except DiscordApiError as exc:
-                log.error("イベント作成に失敗 (%s): %s", event.label, exc)
-                result.errors += 1
+            else:
+                try:
+                    event_id = api.create(**payload)
+                except DiscordApiError as exc:
+                    log.error("イベント作成に失敗 (%s): %s", event.label, exc)
+                    result.errors += 1
+                    continue
+                state.set_discord_event(
+                    event.key,
+                    {
+                        "id": event_id,
+                        "signature": signature,
+                        "name": event.label,
+                        "end": payload["end"].isoformat(),
+                    },
+                )
+                result.created += 1
+                result.links[event.key] = api.event_url(event_id)
+                log.info("Discord イベントを作成: %s", event.label)
                 continue
-            state.set_discord_event(
-                event.key,
-                {
-                    "id": event_id,
-                    "signature": signature,
-                    "name": event.label,
-                    "end": payload["end"].isoformat(),
-                },
-            )
-            result.created += 1
-            result.links[event.key] = api.event_url(event_id)
-            log.info("Discord イベントを作成: %s", event.label)
-            continue
 
         result.links[event.key] = api.event_url(entry["id"])
         if entry.get("signature") == signature:

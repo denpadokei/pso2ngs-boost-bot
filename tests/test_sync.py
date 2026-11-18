@@ -15,10 +15,21 @@ class FakeApi:
         self.created: list[dict] = []
         self.updated: list[tuple[str, dict]] = []
         self.deleted: list[str] = []
+        self.existing: list[dict] = []
+        self.list_error: str | None = None
+        self.list_calls = 0
         self._counter = 0
 
     def event_url(self, event_id: str) -> str:
         return f"https://discord.com/events/123/{event_id}"
+
+    def list(self) -> list[dict]:
+        from pso2boost.discord_events import DiscordApiError
+
+        self.list_calls += 1
+        if self.list_error:
+            raise DiscordApiError(self.list_error)
+        return list(self.existing)
 
     def create(self, **kwargs) -> str:
         self._counter += 1
@@ -173,3 +184,98 @@ def test_recreates_event_when_discord_returns_404(tmp_path: Path):
     assert result.created == 1
     assert api.created
     assert state.discord_event(event.key)["id"] == "ev1"
+
+
+# ------------------------------------------------------------ 重複確認
+def _existing_event(event: BoostEvent, status: str = "scheduled") -> dict:
+    return {
+        "id": "existing-1",
+        "name": event.label,
+        "scheduled_start_time": event.period.start.at.isoformat(),
+        "scheduled_end_time": event.period.end.at.isoformat(),
+        "status": status,
+    }
+
+
+def test_duplicate_event_is_reused_not_created(tmp_path: Path):
+    """state が空でも、Discord 側に同名・同時刻のイベントがあれば作成しない。"""
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    api.existing = [_existing_event(event)]
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 0
+    assert api.created == []
+    # 既存イベントを採用し、内容を合わせるため1回だけ更新される
+    assert [call[0] for call in api.updated] == ["existing-1"]
+    assert state.discord_event(event.key)["id"] == "existing-1"
+    assert result.links[event.key].endswith("/existing-1")
+
+
+def test_second_run_after_reuse_does_not_touch_api(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    api.existing = [_existing_event(event)]
+
+    sync_events([event], state, api, NOW)
+    api.updated.clear()
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 0
+    assert result.updated == 0
+    assert api.updated == []
+
+
+def test_duplicate_check_ignores_different_start(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    duplicate = _existing_event(event)
+    duplicate["scheduled_start_time"] = "2026-11-26T12:00:00+09:00"  # 別の開始時刻
+    api.existing = [duplicate]
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 1
+    assert len(api.created) == 1
+
+
+def test_duplicate_check_ignores_completed_events(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    api.existing = [_existing_event(event, status="completed")]
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 1
+
+
+def test_duplicate_check_failure_falls_back_to_create(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    api.list_error = "HTTP 500: Internal Server Error"
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 1
+    assert len(api.created) == 1
+
+
+def test_duplicate_reuse_dry_run_does_not_touch_api_or_state(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    api.existing = [_existing_event(event)]
+
+    result = sync_events([event], state, api, NOW, dry_run=True)
+
+    assert result.created == 0
+    assert result.skipped == 1
+    assert api.created == []
+    assert api.updated == []
+    assert state.discord_event(event.key) is None
