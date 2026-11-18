@@ -163,9 +163,30 @@ def test_callback_handles_access_denied():
 
 # ------------------------------------------------------------------ 3. チャンネル
 class FakeBot:
-    def __init__(self, channels: dict[str, list[dict]], status: int = 200) -> None:
+    def __init__(
+        self,
+        channels: dict[str, list[dict]],
+        status: int = 200,
+        roles: list[dict] | None = None,
+        bot_roles: list[str] | None = None,
+        bot_id: str = "999",
+    ) -> None:
         self.channels = channels
         self.status = status
+        self.roles = roles  # None なら Administrator 相当（全許可）
+        self.bot_roles = bot_roles or []
+        self.bot_id = bot_id
+
+    def get_me(self) -> dict:
+        return {"id": self.bot_id}
+
+    def get_guild_roles(self, guild_id: str) -> list[dict]:
+        if self.roles is None:
+            return [{"id": guild_id, "permissions": str(1 << 3)}]  # Administrator
+        return self.roles
+
+    def get_guild_member(self, guild_id: str, member_id: str) -> dict:
+        return {"roles": list(self.bot_roles)}
 
     def get_guild_channels(self, guild_id: str) -> list[dict]:
         if self.status >= 400:
@@ -440,3 +461,117 @@ def test_save_page_offers_sync_button():
         discord=FakeBot(CHANNELS),
     )
     assert "今すぐイベントを同期する" in page.body
+
+
+# ------------------------------------------------------------ Bot 権限チェック
+def test_compute_channel_permissions_everyone_and_overwrites():
+    from cloud.discord import (
+        PERMISSION_SEND_MESSAGES,
+        PERMISSION_VIEW_CHANNEL,
+        can_send_messages,
+        compute_channel_permissions,
+    )
+
+    guild = "111"
+    roles = [{"id": guild, "permissions": str(PERMISSION_VIEW_CHANNEL | PERMISSION_SEND_MESSAGES)}]
+    channel = {"permission_overwrites": []}
+    perms = compute_channel_permissions(
+        guild_id=guild, role_ids=set(), roles=roles, channel=channel
+    )
+    assert can_send_messages(perms) is True
+
+    # @everyone がチャンネルで送信を拒否
+    denied = {
+        "permission_overwrites": [
+            {"id": guild, "type": 0, "allow": "0", "deny": str(PERMISSION_SEND_MESSAGES)}
+        ]
+    }
+    perms = compute_channel_permissions(
+        guild_id=guild, role_ids=set(), roles=roles, channel=denied
+    )
+    assert can_send_messages(perms) is False
+
+    # Bot のロールがチャンネルで送信を許可（@everyone deny を上書き）
+    allowed_by_role = {
+        "permission_overwrites": [
+            {"id": guild, "type": 0, "allow": "0", "deny": str(PERMISSION_SEND_MESSAGES)},
+            {"id": "999", "type": 0, "allow": str(PERMISSION_SEND_MESSAGES), "deny": "0"},
+        ]
+    }
+    perms = compute_channel_permissions(
+        guild_id=guild,
+        role_ids={"999"},
+        roles=roles + [{"id": "999", "permissions": "0"}],
+        channel=allowed_by_role,
+    )
+    assert can_send_messages(perms) is True
+
+    # Administrator はチャンネル上書きを無視できる
+    admin_roles = [{"id": guild, "permissions": str(1 << 3)}]
+    perms = compute_channel_permissions(
+        guild_id=guild, role_ids=set(), roles=admin_roles, channel=denied
+    )
+    assert can_send_messages(perms) is True
+
+
+DENY_SEND_CHANNEL = {"id": "558", "name": "権限なし", "type": 0, "guild_id": "111",
+                     "permission_overwrites": [{"id": "111", "type": 0, "allow": "0", "deny": "2048"}]}
+
+DENIED_BOT_CHANNELS = {"111": CHANNELS["111"] + [DENY_SEND_CHANNEL]}
+
+
+def test_channels_marks_channels_without_send_permission():
+    config = make_config()
+    store = make_store()
+    bot = FakeBot(
+        DENIED_BOT_CHANNELS,
+        roles=[{"id": "111", "permissions": str((1 << 10) | (1 << 11))}],
+    )
+
+    page = setup_pages.channels(
+        config, store, query={"guild_id": "111"},
+        cookies=session_cookie(store, ["111"]), discord=bot,
+    )
+
+    assert "（投稿権限なし）" in page.body
+    assert "#テスト" in page.body
+
+
+def test_save_warns_and_marks_permissions_not_ok():
+    config = make_config()
+    store = make_store()
+    bot = FakeBot(
+        DENIED_BOT_CHANNELS,
+        roles=[{"id": "111", "permissions": str((1 << 10) | (1 << 11))}],
+    )
+
+    page = setup_pages.save(
+        config, store,
+        form={"guild_id": "111", "channel_id": "558"},
+        cookies=session_cookie(store, ["111"]),
+        discord=bot,
+    )
+
+    assert "「メッセージを送信」権限がありません" in page.body
+    guild = {g.guild_id: g for g in store.list_guilds()}["111"]
+    assert guild.permissions_ok is False
+    assert guild.channel_id == "558"
+
+
+def test_save_succeeds_when_permission_lookup_fails():
+    config = make_config()
+    store = make_store()
+
+    class BrokenBot(FakeBot):
+        def get_me(self):
+            raise DiscordRestError("HTTP 403", status_code=403)
+
+    page = setup_pages.save(
+        config, store,
+        form={"guild_id": "111", "channel_id": "555"},
+        cookies=session_cookie(store, ["111"]),
+        discord=BrokenBot(CHANNELS),
+    )
+
+    assert "✅" in page.body
+    assert {g.guild_id: g for g in store.list_guilds()}["111"].permissions_ok is True
