@@ -213,21 +213,27 @@ def handle_application_command(
     permissions_ok = missing == 0
 
     store = store or TableStore(config.storage_connection)
-    existing = {
-        guild.guild_id: guild for guild in store.list_guilds()
-    }.get(guild_id)
     now = now_jst()
-    guild = GuildConfig(
-        guild_id=guild_id,
-        channel_id=str(channel.get("id") or channel_value),
-        mention_role_id=existing.mention_role_id if existing else "",
-        enabled=True,
-        permissions_ok=permissions_ok,
-        added_at=existing.added_at if existing else now.isoformat(),
-        last_run_at=existing.last_run_at if existing else "",
-        last_error="",
-    )
-    store.upsert_guild(guild)
+    try:
+        # 初回の Timer 実行より前に /setup が来てもテーブルを自動作成する
+        store.ensure_tables()
+        existing = {
+            guild.guild_id: guild for guild in store.list_guilds()
+        }.get(guild_id)
+        guild = GuildConfig(
+            guild_id=guild_id,
+            channel_id=str(channel.get("id") or channel_value),
+            mention_role_id=existing.mention_role_id if existing else "",
+            enabled=True,
+            permissions_ok=permissions_ok,
+            added_at=existing.added_at if existing else now.isoformat(),
+            last_run_at=existing.last_run_at if existing else "",
+            last_error="",
+        )
+        store.upsert_guild(guild)
+    except Exception as exc:  # どんな失敗でも 3 秒以内に ephemeral 応答を返す
+        log.exception("guilds テーブルの更新に失敗")
+        return 200, ephemeral(f"⚠️ 設定を保存できませんでした: {exc}")
     log.info("サーバー %s の通知先を設定: チャンネル %s", guild_id, guild.channel_id)
 
     message = (
