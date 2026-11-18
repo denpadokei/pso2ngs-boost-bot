@@ -115,3 +115,21 @@ def setup_save(req: func.HttpRequest) -> func.HttpResponse:
     return _response(
         setup_pages.save(config, store, form=form, cookies=_cookies(req))
     )
+
+
+@app.function_name(name="setup_sync_page")
+@app.route(route="setup/sync", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_sync_page(req: func.HttpRequest) -> func.HttpResponse:
+    """手動同期の確認ページ（週次バッチを待たずに反映したい場合）。"""
+    config = cloud_config.CloudConfig.from_env()
+    store = TableStore(config.storage_connection)
+    return _response(setup_pages.sync_ready(config, store, cookies=_cookies(req)))
+
+
+@app.function_name(name="setup_sync_run")
+@app.route(route="setup/sync", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def setup_sync_run(req: func.HttpRequest) -> func.HttpResponse:
+    """週次バッチを即時実行する（OAuth セッション必須）。"""
+    config = cloud_config.CloudConfig.from_env()
+    store = TableStore(config.storage_connection)
+    return _response(setup_pages.sync_now(config, store, cookies=_cookies(req)))
