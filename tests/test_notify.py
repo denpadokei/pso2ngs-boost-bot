@@ -190,3 +190,40 @@ def test_send_event_uses_given_now():
     embed = session.calls[0]["json"]["embeds"][0]
     description = next(f["value"] for f in embed["fields"] if f["name"] == "Description")
     assert description.startswith("【終了】")
+
+
+class SequenceSession:
+    """レスポンスを順に返す Fake。429 の再試行テストに使う。"""
+
+    def __init__(self, statuses: list[int]) -> None:
+        self.statuses = list(statuses)
+        self.calls = 0
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.calls += 1
+        return FakeResponse(self.statuses.pop(0))
+
+
+def test_rate_limit_is_retried_once(monkeypatch):
+    from pso2boost import notify as notify_module
+    from pso2boost.notify import DiscordNotifier
+
+    slept: list[float] = []
+    monkeypatch.setattr(notify_module.time, "sleep", slept.append)
+    session = SequenceSession([429, 204])
+    notifier = DiscordNotifier(webhook_url="https://example.com/hook", session=session)
+
+    assert notifier.send_event(make_event(), "new")
+    assert session.calls == 2
+    assert slept == [1.0]  # retry_after が無いときは既定の1秒
+    assert notifier.last_status == 204
+
+
+def test_failed_post_records_status():
+    from pso2boost.notify import DiscordNotifier
+
+    session = SequenceSession([403])
+    notifier = DiscordNotifier(webhook_url="https://example.com/hook", session=session)
+
+    assert not notifier.send_event(make_event(), "new")
+    assert notifier.last_status == 403

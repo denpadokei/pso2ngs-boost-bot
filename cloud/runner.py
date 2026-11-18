@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
+import requests
+
 from pso2boost.discover import discover_from_rss
 from pso2boost.discord_events import ScheduledEventsApi
 from pso2boost.fetch import Fetcher, SCHEDULE_URL
@@ -32,6 +34,7 @@ from pso2boost.sync import sync_events
 from pso2boost.tz import now_jst
 
 from .config import CloudConfig
+from .interactions import DiscordRest, DiscordRestError
 from .storage import GuildConfig, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)
@@ -165,7 +168,9 @@ def process_guild(
         )
         if not sent:
             result.errors += 1
-            result.last_error = f"{action.kind} 通知の送信に失敗"
+            status = getattr(notifier, "last_status", None)
+            detail = f" (HTTP {status})" if status else ""
+            result.last_error = f"{action.kind} 通知の送信に失敗{detail}"
             continue
         result.notified += 1
         # 投稿に成功したものだけフラグを立てる（失敗は次回再試行）
@@ -203,12 +208,56 @@ def resolve_targets(config: CloudConfig, store: TableStore) -> list[GuildTarget]
     return []
 
 
+def filter_available_targets(
+    targets: list[GuildTarget],
+    config: CloudConfig,
+    store: TableStore,
+    now: datetime,
+    *,
+    guild_client: DiscordRest | None = None,
+) -> list[GuildTarget]:
+    """Bot がキックされたサーバー（GET /guilds が 404/403）を停止して対象から外す。
+
+    一時的なエラー（429 / 5xx / ネットワーク）では無効化しない。
+    """
+    if not targets:
+        return targets
+    discord = guild_client or DiscordRest(config.bot_token)
+    available: list[GuildTarget] = []
+    for target in targets:
+        try:
+            discord.get_guild(target.guild_id)
+            available.append(target)
+        except DiscordRestError as exc:
+            if exc.status_code in (403, 404):
+                store.disable_guild(
+                    target.guild_id, now, f"サーバーにアクセスできません: {exc}"
+                )
+                log.warning(
+                    "サーバー %s を無効化しました（Bot が抜けた可能性）: %s",
+                    target.guild_id,
+                    exc,
+                )
+            else:
+                log.warning(
+                    "サーバー %s の確認に失敗（無効化せず続行）: %s", target.guild_id, exc
+                )
+                available.append(target)
+        except requests.RequestException as exc:
+            log.warning(
+                "サーバー %s の確認に失敗（無効化せず続行）: %s", target.guild_id, exc
+            )
+            available.append(target)
+    return available
+
+
 def run_weekly(
     config: CloudConfig,
     *,
     now: datetime | None = None,
     store: TableStore | None = None,
     fetcher: Fetcher | None = None,
+    guild_client: DiscordRest | None = None,
     api_factory: Callable[[GuildTarget], ScheduledEventsApi] | None = None,
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
 ) -> RunSummary:
@@ -224,6 +273,10 @@ def run_weekly(
     store = store or TableStore(config.storage_connection)
     store.ensure_tables()
     targets = resolve_targets(config, store)
+    # Bot がキックされたサーバーは無効化して対象から外す（Phase 3）
+    targets = filter_available_targets(
+        targets, config, store, now, guild_client=guild_client
+    )
     summary.guilds = len(targets)
     if not targets:
         summary.actions.append("対象サーバーがありません（/setup または環境変数で登録）")

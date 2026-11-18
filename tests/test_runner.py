@@ -10,7 +10,7 @@ from pathlib import Path
 from cloud.config import CloudConfig
 from cloud.runner import resolve_targets, run_weekly
 from cloud.storage import GuildConfig, TableStore
-from fakes import FakeApi, FakeFetcher, FakeNotifier, FakeTableService
+from fakes import FakeApi, FakeDiscordRest, FakeFetcher, FakeNotifier, FakeTableService
 from pso2boost.fetch import SCHEDULE_URL
 from pso2boost.rss import RSS_URL
 from pso2boost.schedule import DEFAULT_KEYWORDS
@@ -46,7 +46,7 @@ def make_config(**overrides) -> CloudConfig:
     return CloudConfig(**values)
 
 
-def make_run(guild_specs: list[tuple[str, str, bool]]):
+def make_run(guild_specs: list[tuple[str, str, bool]], guild_status: dict[str, int] | None = None):
     """guild_specs: (guild_id, channel_id, notifier_fail) のリスト。"""
     service = FakeTableService()
     store = TableStore("unused", service=service)
@@ -58,12 +58,15 @@ def make_run(guild_specs: list[tuple[str, str, bool]]):
         apis[guild_id] = FakeApi(guild_id)
         notifiers[guild_id] = FakeNotifier(channel_id, fail=fail)
 
+    guild_client = FakeDiscordRest(guild_status)
+
     def run(config=None, fetcher=None):
         return run_weekly(
             config or make_config(),
             now=NOW,
             store=store,
             fetcher=fetcher or make_fetcher(),
+            guild_client=guild_client,
             api_factory=lambda target: apis[target.guild_id],
             notifier_factory=lambda target: notifiers[target.guild_id],
         )
@@ -173,3 +176,59 @@ def test_missing_bot_token_does_nothing():
 
     assert summary.guilds == 0
     assert summary.notified == 0
+
+
+# ------------------------------------------------------------------ Phase 3
+def test_kicked_guild_is_disabled_and_skipped():
+    """Bot が抜けたサーバー（404/403）は無効化して、他のサーバーは続行する。"""
+    store, apis, notifiers, run = make_run(
+        [("111", "chan-A", False), ("222", "chan-B", False)],
+        guild_status={"222": 404},
+    )
+
+    summary = run()
+
+    assert summary.guilds == 1
+    assert notifiers["111"].sent != []
+    assert notifiers["222"].sent == []
+    assert apis["222"].created == []
+
+    guilds = {g.guild_id: g for g in store.list_guilds()}
+    assert guilds["222"].enabled is False
+    assert "アクセスできません" in guilds["222"].last_error
+
+    # 無効化されたサーバーは次回の対象にならない
+    from cloud.runner import resolve_targets
+
+    assert [t.guild_id for t in resolve_targets(make_config(), store)] == ["111"]
+
+
+def test_guild_forbidden_is_disabled():
+    store, _, notifiers, run = make_run(
+        [("111", "chan-A", False)], guild_status={"111": 403}
+    )
+    summary = run()
+    assert summary.guilds == 0
+    assert {g.guild_id: g for g in store.list_guilds()}["111"].enabled is False
+
+
+def test_transient_guild_error_keeps_guild_active():
+    """一時的な 5xx では無効化しない（次回も対象に残る）。"""
+    store, _, notifiers, run = make_run(
+        [("111", "chan-A", False)], guild_status={"111": 500}
+    )
+    summary = run()
+
+    assert summary.guilds == 1
+    assert notifiers["111"].sent != []
+    assert {g.guild_id: g for g in store.list_guilds()}["111"].enabled is True
+
+
+def test_send_failure_records_http_status():
+    store, _, notifiers, run = make_run([("111", "chan-A", True)])
+
+    summary = run()
+
+    assert summary.failed == 1
+    guild = {g.guild_id: g for g in store.list_guilds()}["111"]
+    assert "通知の送信に失敗 (HTTP 403)" in guild.last_error

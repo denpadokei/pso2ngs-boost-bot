@@ -229,6 +229,24 @@ class TableStore:
             },
         )
 
+    def disable_guild(self, guild_id: str, now: datetime, reason: str) -> None:
+        """Bot がキックされるなどしたサーバーを停止する（未登録なら何もしない）。
+
+        /setup をやり直せば（upsert で enabled=True に戻る）再度有効化できる。
+        """
+        if guild_id not in {guild.guild_id for guild in self.list_guilds()}:
+            return
+        self._service.upsert_entity(
+            self.guilds_table,
+            {
+                "PartitionKey": GUILD_PARTITION,
+                "RowKey": guild_id,
+                "enabled": False,
+                "last_error": reason[:LAST_ERROR_MAX],
+                "last_run_at": now.isoformat(),
+            },
+        )
+
     # ----------------------------------------------------------------- state
     def load_state(self, guild_id: str, now: datetime) -> State:
         rows = self._service.list_entities(

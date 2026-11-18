@@ -38,7 +38,11 @@ EPHEMERAL_FLAG = 1 << 6
 
 
 class DiscordRestError(RuntimeError):
-    """Discord API への確認に失敗した。"""
+    """Discord API への確認に失敗した。status_code に HTTP ステータスを持つ。"""
+
+    def __init__(self, message: str, status_code: int = 0) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class DiscordRest:
@@ -53,7 +57,8 @@ class DiscordRest:
         response = self.session.get(API_BASE + path, timeout=self.timeout)
         if response.status_code >= 400:
             raise DiscordRestError(
-                f"HTTP {response.status_code}: {response.text[:200]}"
+                f"HTTP {response.status_code}: {response.text[:200]}",
+                status_code=response.status_code,
             )
         return response.json()
 

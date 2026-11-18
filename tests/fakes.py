@@ -11,6 +11,21 @@ import re
 from pso2boost.fetch import FetchError
 
 
+class FakeDiscordRest:
+    """cloud.interactions.DiscordRest の代わり。ギルドごとに HTTP ステータスを返す。"""
+
+    def __init__(self, guild_status: dict[str, int] | None = None) -> None:
+        self.guild_status = guild_status or {}
+
+    def get_guild(self, guild_id: str) -> dict:
+        status = self.guild_status.get(guild_id, 200)
+        if status >= 400:
+            from cloud.interactions import DiscordRestError
+
+            raise DiscordRestError(f"HTTP {status}: Unknown Guild", status_code=status)
+        return {"id": guild_id}
+
+
 class FakeTableService:
     """azure.data.tables のうち TableStore が使う部分だけのインメモリ実装。"""
 
@@ -85,10 +100,13 @@ class FakeNotifier:
         self.channel_id = channel_id
         self.sent: list[tuple[str, str, str | None]] = []
         self.fail = fail
+        self.last_status: int | None = None
 
     def send_event(self, event, kind, event_url=None, now=None) -> bool:
         if self.fail:
+            self.last_status = 403
             return False
+        self.last_status = 200
         self.sent.append((kind, event.key, event_url))
         return True
 
