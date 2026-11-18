@@ -219,3 +219,13 @@ def test_notifier_retries_server_errors(monkeypatch):
 
     assert notifier.send_event(event, "new", now=NOW) is True
     assert session.calls == 3
+
+
+# -------------------------------------- 再レビュー R1: エラーページのHTTPステータス
+def test_error_page_returns_http_500_but_user_cancel_stays_200():
+    import function_app as entry
+    from cloud.setup_pages import Page, _error_page, render_page
+
+    assert entry._response(Page(200, _error_page("boom"))).status_code == 500
+    assert entry._response(Page(200, render_page("ok", "<h1>ok</h1>"))).status_code == 200
+    assert entry._response(Page(403, _error_page("denied"))).status_code == 403

@@ -36,7 +36,7 @@ def _cookies(req: func.HttpRequest) -> dict:
 def _response(page: setup_pages.Page) -> func.HttpResponse:
     status = page.status
     # 業務エラーページは HTTP でもエラーを表現する（監視で成功に見えないように）
-    if status == 200 and page.body.startswith(ERROR_MARKER):
+    if status == 200 and (page.is_error or ERROR_MARKER in page.body):
         status = 500
     return func.HttpResponse(
         page.body,

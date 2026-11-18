@@ -42,10 +42,14 @@ ERROR_MARKER = "<!-- error -->"  # エラーページを HTTP ステータスに
 class Page:
     """ハンドラの戻り値。function_app が HttpResponse へ変換する。"""
 
-    def __init__(self, status: int, body: str = "", headers: dict | None = None) -> None:
+    def __init__(
+        self, status: int, body: str = "", headers: dict | None = None,
+        is_error: bool = False,
+    ) -> None:
         self.status = status
         self.body = body
         self.headers = headers or {}
+        self.is_error = is_error
 
 
 # ------------------------------------------------------------------ HTML 部品
@@ -139,7 +143,16 @@ def callback(
             "login_required": "Discord にログインしてからもう一度お試しください。",
             "consent_required": "このアプリへの初回認可が必要です。もう一度お試しください。",
         }
-        return Page(200, _error_page(messages.get(error, f"認可に失敗しました: {error}")))
+        message = messages.get(error, f"認可に失敗しました: {error}")
+        # ユーザーのキャンセルは異常ではないので HTTP 200 の案内ページにする
+        return Page(
+            200,
+            render_page(
+                "認可",
+                f"<h1>ℹ️ {html.escape(message)}</h1>"
+                '<p class="note"><a href="/api/setup">最初からやり直す</a></p>',
+            ),
+        )
 
     state = str(query.get("state") or "")
     if not state or state != cookies.get(STATE_COOKIE):
