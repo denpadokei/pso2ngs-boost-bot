@@ -17,6 +17,7 @@ import azure.functions as func
 
 from cloud import config as cloud_config
 from cloud import runner, setup_pages
+from cloud.setup_pages import ERROR_MARKER
 from cloud.storage import TableStore
 
 app = func.FunctionApp()
@@ -33,9 +34,13 @@ def _cookies(req: func.HttpRequest) -> dict:
 
 
 def _response(page: setup_pages.Page) -> func.HttpResponse:
+    status = page.status
+    # 業務エラーページは HTTP でもエラーを表現する（監視で成功に見えないように）
+    if status == 200 and (page.is_error or ERROR_MARKER in page.body):
+        status = 500
     return func.HttpResponse(
         page.body,
-        status_code=page.status,
+        status_code=status,
         headers=page.headers,
         mimetype="text/html" if page.body else None,
         charset="utf-8" if page.body else None,
@@ -50,7 +55,14 @@ def _response(page: setup_pages.Page) -> func.HttpResponse:
 )
 def weekly_sync(timer: func.TimerRequest) -> None:
     """全サーバーの週次同期（新着・開始・終了の通知とイベント作成）。"""
-    runner.run_weekly(cloud_config.CloudConfig.from_env())
+    summary = runner.run_weekly(cloud_config.CloudConfig.from_env())
+    # 例外を閉じ込めた分、失敗をInvocationの成否として明示的に伝える
+    if summary.status in {"failed", "partial"}:
+        raise RuntimeError(f"週次同期に失敗: {summary.summary} / {summary.actions}")
+    if summary.status == "skipped" and not any(
+        "実行中" in action for action in summary.actions
+    ):
+        raise RuntimeError(f"週次同期が実行されませんでした: {summary.actions}")
 
 
 @app.function_name(name="health")
@@ -58,14 +70,19 @@ def weekly_sync(timer: func.TimerRequest) -> None:
 def health(req: func.HttpRequest) -> func.HttpResponse:
     """デプロイ確認用。設定の有無だけ返す（秘密は含めない）。"""
     config = cloud_config.CloudConfig.from_env()
+    configured = bool(
+        config.bot_token and config.storage_connection and config.client_secret
+    )
     body = {
-        "status": "ok",
+        "status": "ok" if configured else "degraded",
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
         "client_secret": bool(config.client_secret),
     }
     return func.HttpResponse(
-        json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"
+        json.dumps(body, ensure_ascii=False),
+        status_code=200 if configured else 503,
+        mimetype="application/json",
     )
 
 

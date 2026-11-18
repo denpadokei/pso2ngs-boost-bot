@@ -62,6 +62,15 @@ class FakeTableService:
         else:
             existing.update(entity)  # merge
 
+    def create_entity(self, name: str, entity: dict) -> None:
+        from cloud.storage import LockConflict
+
+        entities = self._entities(name)
+        key = (str(entity["PartitionKey"]), str(entity["RowKey"]))
+        if key in entities:
+            raise LockConflict("entity already exists")
+        entities[key] = dict(entity)
+
     def delete_entity(self, name: str, partition_key: str, row_key: str) -> None:
         entities = self._entities(name)
         entities.pop((str(partition_key), str(row_key)), None)

@@ -131,7 +131,7 @@ def test_guild_failure_does_not_block_others():
 
     # 失敗は last_error に記録され、フラグは立っていない（次回再試行）
     guild = {g.guild_id: g for g in store.list_guilds()}["222"]
-    assert "通知の送信に失敗" in guild.last_error
+    assert "投稿が拒否されました" in guild.last_error
     state_b = store.load_state("222", NOW)
     assert state_b.snapshot()["seen"] == {}
 
@@ -231,4 +231,4 @@ def test_send_failure_records_http_status():
 
     assert summary.failed == 1
     guild = {g.guild_id: g for g in store.list_guilds()}["111"]
-    assert "通知の送信に失敗 (HTTP 403)" in guild.last_error
+    assert "投稿が拒否されました (HTTP 403)" in guild.last_error

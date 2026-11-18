@@ -16,6 +16,7 @@ HTTP Interactions には「3秒以内の応答」というハードな制約が�
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from urllib.parse import urlencode
@@ -30,6 +31,8 @@ MANAGE_GUILD = 1 << 5
 SETUP_SCOPES = "identify guilds"
 
 SESSION_TTL_SECONDS = 15 * 60
+
+log = logging.getLogger(__name__)
 
 
 class OAuthError(RuntimeError):
@@ -46,7 +49,6 @@ def authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
             "response_type": "code",
             "scope": SETUP_SCOPES,
             "state": state,
-            "prompt": "none",  # 認可済みならそのまま戻ってくる
         }
     )
     return f"{AUTHORIZE_URL}?{query}"
@@ -124,6 +126,7 @@ def manageable_guilds(guilds: list[dict]) -> list[dict]:
         try:
             permissions = int(str(guild.get("permissions") or "0"))
         except ValueError:
+            log.warning("サーバー %s の権限値を解釈できませんでした", guild.get("id"))
             continue
         if permissions & MANAGE_GUILD:
             result.append(guild)

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import time
 from urllib.parse import urlencode
 
@@ -34,17 +35,24 @@ from .discord import (
 from .storage import GuildConfig, TableStore
 from pso2boost.tz import now_jst
 
+log = logging.getLogger(__name__)
+
 STATE_COOKIE = "pso2state"
 SESSION_COOKIE = "pso2session"
+ERROR_MARKER = "<!-- error -->"  # エラーページを HTTP ステータスに変換するための印
 
 
 class Page:
     """ハンドラの戻り値。function_app が HttpResponse へ変換する。"""
 
-    def __init__(self, status: int, body: str = "", headers: dict | None = None) -> None:
+    def __init__(
+        self, status: int, body: str = "", headers: dict | None = None,
+        is_error: bool = False,
+    ) -> None:
         self.status = status
         self.body = body
         self.headers = headers or {}
+        self.is_error = is_error
 
 
 # ------------------------------------------------------------------ HTML 部品
@@ -86,7 +94,7 @@ def render_page(title: str, body: str) -> str:
 def _error_page(message: str) -> str:
     return render_page(
         "エラー",
-        f"<h1>⚠️ {html.escape(message)}</h1>"
+        f"{ERROR_MARKER}<h1>⚠️ {html.escape(message)}</h1>"
         '<p class="note">しばらくしてからもう一度お試しください。</p>',
     )
 
@@ -132,7 +140,22 @@ def callback(
     session = session or requests.Session()
 
     if query.get("error"):
-        return Page(200, _error_page("認可がキャンセルされました。"))
+        error = str(query.get("error"))
+        messages = {
+            "access_denied": "認可が拒否されました。許可する場合はもう一度お試しください。",
+            "login_required": "Discord にログインしてからもう一度お試しください。",
+            "consent_required": "このアプリへの初回認可が必要です。もう一度お試しください。",
+        }
+        message = messages.get(error, f"認可に失敗しました: {error}")
+        # ユーザーのキャンセルは異常ではないので HTTP 200 の案内ページにする
+        return Page(
+            200,
+            render_page(
+                "認可",
+                f"<h1>ℹ️ {html.escape(message)}</h1>"
+                '<p class="note"><a href="/api/setup">最初からやり直す</a></p>',
+            ),
+        )
 
     state = str(query.get("state") or "")
     if not state or state != cookies.get(STATE_COOKIE):
@@ -211,7 +234,11 @@ def _bot_permissions(
         me = discord.get_me()
         member = discord.get_guild_member(guild_id, str(me.get("id") or ""))
         roles = discord.get_guild_roles(guild_id)
-    except Exception:  # 権限確認はベストエフォート（失敗しても選択は続行）
+    except (DiscordRestError, requests.RequestException) as exc:
+        log.warning("Bot の権限確認に失敗しました (guild=%s): %s", guild_id, exc)
+        return None  # ベストエフォート（判定不能であることは呼び出し側で表示する）
+    except Exception as exc:
+        log.exception("Bot の権限確認で予期しないエラー (guild=%s)", guild_id)
         return None
     role_ids = {str(role) for role in member.get("roles") or []}
     return role_ids, roles
@@ -253,6 +280,12 @@ def channels(
         return Page(200, _error_page(f"チャンネル一覧を取得できませんでした: {exc}"))
 
     permission_info = _bot_permissions(discord, guild_id)
+    permission_note = (
+        '<p class="error">⚠️ Bot の権限を確認できませんでした。'
+        "投稿できないチャンネルがあるかもしれません。</p>"
+        if permission_info is None
+        else ""
+    )
 
     def label(channel: dict) -> str:
         name = html.escape(str(channel.get("name") or channel.get("id")))
@@ -279,7 +312,8 @@ def channels(
         f'<p><select name="channel_id">{options}</select></p>'
         f'<p><button class="button" type="submit">設定する</button></p>'
         "</form>"
-        '<p class="note">毎週水曜 13:00 (JST) にブーストキャンペーンの通知と'
+        + permission_note
+        + '<p class="note">毎週水曜 13:00 (JST) にブーストキャンペーンの通知と'
         "イベント作成を行います。</p>"
     )
     return Page(200, render_page("通知先の選択", body))
@@ -345,12 +379,21 @@ def sync_now(
         + "</li>"
         for d in getattr(summary, "details", [])
     )
+    status = getattr(summary, "status", "ok")
+    headline = "✅ 同期が完了しました" if status == "ok" else (
+        "⏭️ 同期をスキップしました" if status == "skipped" else "⚠️ 同期に問題がありました"
+    )
+    notes = "".join(
+        f"<li class='error'>{html.escape(str(action))}</li>"
+        for action in getattr(summary, "actions", [])
+    )
     body = (
-        "<h1>✅ 同期が完了しました</h1>"
+        f"<h1>{headline}</h1>"
         f"<p>通知 {summary.notified} / イベント作成 {summary.created} / "
         f"更新 {summary.updated} / 削除 {summary.deleted}"
         + (f" / 失敗 {summary.failed}" if getattr(summary, "failed", 0) else "")
         + "</p>"
+        + (f"<ul class='error'>{notes}</ul>" if notes else "")
         + (f"<ul>{rows}</ul>" if rows else "")
         + '<p class="note"><a href="/api/setup">設定ページへ戻る</a></p>'
     )
@@ -390,7 +433,14 @@ def save(
     permission_info = _bot_permissions(discord, guild_id)
     permissions_ok = True
     warning = ""
-    if permission_info is not None:
+    if permission_info is None:
+        # 確認できなかったのに True と捏造すると、403 が黙って繰り返される
+        permissions_ok = False
+        warning = (
+            "⚠️ Bot の権限を確認できませんでした。"
+            "通知が届かない可能性があります（チャンネル権限をご確認ください）。"
+        )
+    else:
         role_ids, roles = permission_info
         perms = compute_channel_permissions(
             guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel

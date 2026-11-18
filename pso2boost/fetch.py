@@ -56,7 +56,16 @@ class Fetcher:
             try:
                 response = self.session.get(url, timeout=self.timeout)
                 if response.status_code >= 500:
-                    raise FetchError(f"HTTP {response.status_code}: {url}")
+                    # 一過性のサーバーエラーは再試行する（retries を無効化しない）
+                    last_error = FetchError(f"HTTP {response.status_code}: {url}")
+                    log.warning(
+                        "取得失敗 (%d/%d) %s: HTTP %s", attempt, self.retries, url,
+                        response.status_code,
+                    )
+                    if attempt < self.retries:
+                        time.sleep(min(2**attempt, 8))
+                        continue
+                    raise last_error
                 if response.status_code >= 400:
                     # 4xx はリトライしても無駄なので即座に諦める
                     raise FetchError(f"HTTP {response.status_code}: {url}")
