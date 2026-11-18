@@ -1,0 +1,9 @@
+# Azure Functions（共有Bot）用の依存関係。
+# セルフホスト用の requirements.txt とは分けて、
+# ローカルで Azure SDK を入れたくない人に影響しないようにする。
+azure-functions>=1.20
+azure-data-tables>=12.4
+pynacl>=1.5
+requests>=2.31
+beautifulsoup4>=4.12
+tzdata>=2024.1

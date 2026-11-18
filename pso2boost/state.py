@@ -21,8 +21,14 @@ STATE_VERSION = 1
 
 
 class State:
-    def __init__(self, path: str | Path, now: datetime) -> None:
-        self.path = Path(path)
+    def __init__(
+        self,
+        path: str | Path | None,
+        now: datetime,
+        *,
+        data: dict | None = None,
+    ) -> None:
+        self.path = Path(path) if path else None
         self.now = now
         self._data: dict = {
             "version": STATE_VERSION,
@@ -31,23 +37,34 @@ class State:
             "rss": {},
             "discord": {},
         }
-        self._load()
+        if data is not None:
+            self._apply(data)
+        else:
+            self._load()
 
     # ------------------------------------------------------------------ load
     def _load(self) -> None:
-        if not self.path.exists():
+        if self.path is None or not self.path.exists():
             return
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning("状態ファイルを読めませんでした (%s): %s", self.path, exc)
             return
+        self._apply(loaded)
+
+    def _apply(self, loaded: dict) -> None:
+        """辞書から内部状態を復元（不正な内容は無視する）。"""
         if not isinstance(loaded, dict):
             return
         self._data["seen"] = dict(loaded.get("seen") or {})
         self._data["sent"] = dict(loaded.get("sent") or {})
         self._data["rss"] = dict(loaded.get("rss") or {})
         self._data["discord"] = dict(loaded.get("discord") or {})
+
+    def snapshot(self) -> dict:
+        """内部状態の深いコピー（シリアライズ用）。"""
+        return json.loads(json.dumps(self._data, ensure_ascii=False))
 
     # ------------------------------------------------------------------ seen
     def is_seen(self, key: str) -> bool:
@@ -139,6 +156,9 @@ class State:
         }
 
     def save(self) -> None:
+        if self.path is None:
+            log.warning("状態の保存先が未指定のため、保存しません")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(self._data, ensure_ascii=False, indent=2) + "\n"
         temp = self.path.with_suffix(self.path.suffix + ".tmp")

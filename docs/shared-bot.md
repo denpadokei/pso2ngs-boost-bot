@@ -322,3 +322,28 @@ docs/shared-bot.md       # この設計書
 - コールバック URL・セッション・CSRF 対策・トークン更新を持たなくてよい
 - 権限は Discord 側のコマンド権限（`MANAGE_GUILD`）で制御できる
 - どうしても Web 設定が必要になった段階で、後から OAuth を足せる
+
+## 16. 実装メモ（2026-11 実装時の判断）
+
+設計書と細部が異なる・補足が必要な点。
+
+- **Timer の Cron**: Azure Functions（NCRONTAB）は秒を含む6フィールドのため、
+  `0 4 * * 3` ではなく `0 0 4 * * 3`（毎週水曜 04:00 UTC = 13:00 JST）。
+- **RSS の既読**: state テーブルの予約パーティション `_shared` に全サーバー共用で
+  保存する。「pso2.jp への取得を1回に抑える」ため、サーバーごとの state には
+  RSS の既読を置かない。
+- **state の RowKey**: `event:<event_key>` と `rss:<URL>`。URL は `/` `?` `#` など
+  RowKey に使えない文字を含むため percent-encode して保存する。
+- **並列実行**: `requests` が同期 API のため `asyncio.Semaphore` ではなく
+  `ThreadPoolExecutor(max_workers=CLOUD_CONCURRENCY, 既定4)`。PSO2 側の
+  HTTP は準備フェーズをメインスレッドで直列に実行し、ワーカーは Discord API だけ。
+- **Phase 1 のフォールバック**: guilds テーブルに登録がなければ環境変数
+  `DISCORD_GUILD_ID` / `DISCORD_CHANNEL_ID` の1サーバーを対象にする
+  （このサーバーの `last_error` はログのみ）。`/setup` による登録があればそちら優先。
+- **/setup の Bot 権限確認**: インタラクションの `app_permissions`（ギルド単位）から
+  判定し、不足なら警告を添えて保存する。チャンネル毎の上書きは週次実行時の
+  送信成否が `last_error` に残るため、そちらで気づける。
+- **キック検出**: `GET /guilds/{id}` が 404/403 のときだけ `enabled=false`。
+  429/5xx/ネットワークエラーでは無効化しない。
+- **コマンド登録**: `python -m cloud.commands`（`DISCORD_BOT_TOKEN` /
+  `DISCORD_APPLICATION_ID` 必須、`DISCORD_DEV_GUILD_ID` でギルドコマンド化）。

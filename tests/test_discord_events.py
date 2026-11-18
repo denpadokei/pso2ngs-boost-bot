@@ -89,6 +89,33 @@ def test_rate_limit_is_retried(monkeypatch):
     assert slept == [0.5]
 
 
+def test_server_error_is_retried_then_succeeds(monkeypatch):
+    """5xx は指数バックオフで再試行する（Phase 3: 429/5xx 再試行）。"""
+    slept: list[float] = []
+    monkeypatch.setattr(discord_events.time, "sleep", slept.append)
+    api, session = api_with(
+        [
+            FakeResponse(503),
+            FakeResponse(502),
+            FakeResponse(200, {"id": "7"}),
+        ]
+    )
+    from datetime import datetime
+
+    from pso2boost.tz import JST
+
+    event_id = api.create(
+        name="n",
+        description="",
+        start=datetime(2026, 11, 25, 12, 0, tzinfo=JST),
+        end=datetime(2026, 12, 2, 11, 0, tzinfo=JST),
+        location="l",
+    )
+    assert event_id == "7"
+    assert len(session.calls) == 3
+    assert slept == [2, 4]
+
+
 def test_error_raises_with_body():
     api, _ = api_with([FakeResponse(403, {"message": "Missing Permissions"})])
     with pytest.raises(DiscordApiError) as excinfo:

@@ -209,6 +209,8 @@ class DiscordNotifier:
         self.bot_token = (bot_token or "").strip()
         self.channel_id = (channel_id or "").strip()
         self.session = session or requests
+        # 直近の投稿結果（HTTP ステータス）。失敗の記録に使う。
+        self.last_status: int | None = None
 
     @property
     def enabled(self) -> bool:
@@ -260,8 +262,10 @@ class DiscordNotifier:
                     url, json=payload, headers=headers, timeout=self.timeout
                 )
             except requests.RequestException as exc:
+                self.last_status = None
                 log.error("Discord への接続に失敗: %s", exc)
                 return False
+            self.last_status = response.status_code
             if response.status_code == 429 and attempt == 1:
                 retry_after = 1.0
                 try:
