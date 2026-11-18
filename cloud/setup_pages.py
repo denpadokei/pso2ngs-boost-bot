@@ -252,6 +252,77 @@ def channels(
     return Page(200, render_page("通知先の選択", body))
 
 
+# ------------------------------------------------------------------ 5. 手動同期
+def sync_ready(
+    config: CloudConfig,
+    store: TableStore,
+    *,
+    cookies: dict,
+) -> Page:
+    """手動同期の確認ページ（実行ボタンだけを出す）。"""
+    payload = store.get_session(cookies.get(SESSION_COOKIE, ""), now_jst())
+    if payload is None:
+        return Page(403, _error_page("セッションの有効期限が切れています。設定ページを開き直してください。"))
+
+    body = (
+        "<h1>今すぐ同期しますか？</h1>"
+        "<p>週次バッチと同じ処理をすぐに実行します。</p>"
+        "<ul>"
+        "<li>新しいキャンペーンの通知</li>"
+        "<li>Discord イベントの作成・更新・終了後の削除</li>"
+        "</ul>"
+        '<p class="note">10秒〜1分ほどかかります。実行中はページを閉じないでください。</p>'
+        '<form method="post" action="/api/setup/sync">'
+        '<button class="button" type="submit">同期を実行</button>'
+        "</form>"
+        '<p class="note"><a href="/api/setup">設定ページへ戻る</a></p>'
+    )
+    return Page(200, render_page("今すぐ同期", body))
+
+
+def sync_now(
+    config: CloudConfig,
+    store: TableStore,
+    *,
+    cookies: dict,
+    run=None,
+) -> Page:
+    """週次バッチを即時実行し、結果を表示する。
+
+    ``run`` はテスト用の差し替え（省略時は cloud.runner.run_weekly）。
+    """
+    payload = store.get_session(cookies.get(SESSION_COOKIE, ""), now_jst())
+    if payload is None:
+        return Page(403, _error_page("セッションの有効期限が切れています。設定ページを開き直してください。"))
+
+    if run is None:
+        from . import runner as runner_module
+
+        run = lambda: runner_module.run_weekly(config, store=store)
+
+    try:
+        summary = run()
+    except Exception as exc:
+        return Page(200, _error_page(f"同期に失敗しました: {exc}"))
+
+    rows = "".join(
+        f"<li>サーバー {html.escape(d.guild_id)}: 通知 {d.notified} / "
+        f"作成 {d.created} / 更新 {d.updated} / 削除 {d.deleted}"
+        + (f"<br><span class='error'>{html.escape(d.last_error)}</span>" if d.last_error else "")
+        + "</li>"
+        for d in getattr(summary, "details", [])
+    )
+    body = (
+        "<h1>✅ 同期が完了しました</h1>"
+        f"<p>通知 {summary.notified} / イベント作成 {summary.created} / "
+        f"更新 {summary.updated} / 削除 {summary.deleted}"
+        + (f" / 失敗 {summary.failed}" if getattr(summary, "failed", 0) else "")
+        + "</p>"
+        + (f"<ul>{rows}</ul>" if rows else "")
+        + '<p class="note"><a href="/api/setup">設定ページへ戻る</a></p>'
+    )
+    return Page(200, render_page("同期結果", body))
+
 # ------------------------------------------------------------------ 4. 保存
 def save(
     config: CloudConfig,
@@ -306,6 +377,10 @@ def save(
     body = (
         f"<h1>✅ 通知先を #{html.escape(str(channel.get('name') or channel_id))} に設定しました</h1>"
         "<p>毎週水曜 13:00 (JST) にブーストキャンペーンの通知とイベント作成を行います。</p>"
+        '<form method="post" action="/api/setup/sync">'
+        '<button class="button" type="submit">今すぐイベントを同期する</button>'
+        "</form>"
+        '<p class="note">待たずに今すぐ反映したい場合はこちら（10秒〜1分ほどかかります）。</p>'
         '<p class="note">Bot をサーバーから抜くと、次の週次実行で自動的に停止します。</p>'
     )
     return Page(200, render_page("設定完了", body))

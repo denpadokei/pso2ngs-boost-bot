@@ -348,3 +348,95 @@ def test_save_updates_existing_row():
     guilds = {g.guild_id: g for g in store.list_guilds()}
     assert len(guilds) == 1
     assert guilds["111"].channel_id == "556"
+
+
+# ------------------------------------------------------------------ 5. 手動同期
+class FakeSummary:
+    guilds = 1
+    notified = 2
+    created = 1
+    updated = 0
+    deleted = 0
+    failed = 0
+
+    class _Detail:
+        guild_id = "111"
+        notified = 2
+        created = 1
+        updated = 0
+        deleted = 0
+        last_error = ""
+
+    details = [_Detail()]
+
+
+def test_sync_ready_requires_session():
+    page = setup_pages.sync_ready(make_config(), make_store(), cookies={})
+    assert page.status == 403
+
+
+def test_sync_ready_shows_button():
+    store = make_store()
+    page = setup_pages.sync_ready(
+        make_config(), store, cookies=session_cookie(store, ["111"])
+    )
+    assert page.status == 200
+    assert "同期を実行" in page.body
+    assert 'action="/api/setup/sync"' in page.body
+
+
+def test_sync_now_requires_session():
+    page = setup_pages.sync_now(make_config(), make_store(), cookies={})
+    assert page.status == 403
+
+
+def test_sync_now_runs_and_shows_summary():
+    store = make_store()
+    calls = []
+
+    def fake_run():
+        calls.append(1)
+        return FakeSummary()
+
+    page = setup_pages.sync_now(
+        make_config(),
+        store,
+        cookies=session_cookie(store, ["111"]),
+        run=fake_run,
+    )
+
+    assert calls == [1]
+    assert page.status == 200
+    assert "同期が完了しました" in page.body
+    assert "通知 2" in page.body
+    assert "サーバー 111" in page.body
+
+
+def test_sync_now_reports_failure():
+    store = make_store()
+
+    def broken_run():
+        raise RuntimeError("discord down")
+
+    page = setup_pages.sync_now(
+        make_config(),
+        store,
+        cookies=session_cookie(store, ["111"]),
+        run=broken_run,
+    )
+    assert page.status == 200
+    assert "同期に失敗しました" in page.body
+    assert "discord down" in page.body
+
+
+def test_save_page_offers_sync_button():
+    config = make_config()
+    store = make_store()
+    page = setup_pages.save(
+        config,
+        store,
+        form={"guild_id": "111", "channel_id": "555"},
+        cookies=session_cookie(store, ["111"]),
+        discord=FakeBot(CHANNELS),
+    )
+    assert "今すぐイベントを同期する" in page.body
