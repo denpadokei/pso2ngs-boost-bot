@@ -1,5 +1,6 @@
 """cloud.oauth（Discord OAuth2 設定フローのコア）のテスト。"""
 
+import time
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -43,49 +44,20 @@ def test_manageable_guilds_keeps_only_manage_guild():
 
 
 # ------------------------------------------------------------------ 署名セッション
-def test_issue_and_load_session_roundtrip():
-    token = oauth.issue_session(
-        "s3cret", user_id="42", username="でんぱ", guild_ids=["111", "222"]
-    )
-    payload = oauth.load_session("s3cret", token)
+def test_make_session_id_is_random_and_opaque():
+    first = oauth.make_session_id()
+    second = oauth.make_session_id()
 
-    assert payload["uid"] == "42"
-    assert payload["name"] == "でんぱ"
-    assert payload["guilds"] == ["111", "222"]
-    assert payload["exp"] > 0
+    assert len(first) >= 16
+    assert first != second
+    # クッキーに載る値なので、URL セーフな文字だけで構成されている
+    assert all(ch.isalnum() or ch in "-_" for ch in first)
 
 
-def test_load_session_rejects_wrong_secret():
-    token = oauth.issue_session("s3cret", user_id="42", username="x", guild_ids=["1"])
-    assert oauth.load_session("other", token) is None
-
-
-def test_load_session_rejects_tampered_payload():
-    import base64
-
-    token = oauth.issue_session("s3cret", user_id="42", username="x", guild_ids=["1"])
-    body, signature = token.split(".")
-    forged = base64.urlsafe_b64encode(
-        b'{"uid":"999","guilds":["777"],"exp":9999999999}'
-    ).decode("ascii")
-    assert oauth.load_session("s3cret", f"{forged}.{signature}") is None
-
-
-def test_load_session_rejects_expired():
-    token = oauth.issue_session(
-        "s3cret",
-        user_id="42",
-        username="x",
-        guild_ids=["1"],
-        now=1000.0 - oauth.SESSION_TTL_SECONDS - 1,
-    )
-    assert oauth.load_session("s3cret", token) is None
-
-
-def test_load_session_rejects_garbage():
-    assert oauth.load_session("s3cret", "") is None
-    assert oauth.load_session("s3cret", "not-a-token") is None
-    assert oauth.load_session("s3cret", "!!!.???") is None
+def test_session_expiry_is_in_the_future():
+    now = 1000.0
+    assert oauth.session_expiry(now) == 1000 + oauth.SESSION_TTL_SECONDS
+    assert oauth.session_expiry() > time.time()
 
 
 # ------------------------------------------------------------------ コード交換

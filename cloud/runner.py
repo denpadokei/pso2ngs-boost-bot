@@ -272,6 +272,7 @@ def run_weekly(
 
     store = store or TableStore(config.storage_connection)
     store.ensure_tables()
+    store.prune_sessions(now)
     targets = resolve_targets(config, store)
     # Bot がキックされたサーバーは無効化して対象から外す（Phase 3）
     targets = filter_available_targets(

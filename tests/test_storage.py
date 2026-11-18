@@ -245,3 +245,57 @@ def test_adapter_translates_calls_to_real_sdk():
     table.query_entities.reset_mock()
     adapter.list_entities("state")
     table.query_entities.assert_called_with(None)
+
+
+# ---------------------------------------------------------------- セッション
+def test_put_and_get_session():
+    store, _ = make_store()
+    store.put_session(
+        "sess-1",
+        {"uid": "42", "name": "でんぱ", "guilds": ["111", "222"], "exp": 9999999999},
+        NOW,
+    )
+    payload = store.get_session("sess-1", NOW)
+
+    assert payload["uid"] == "42"
+    assert payload["name"] == "でんぱ"
+    assert payload["guilds"] == ["111", "222"]
+
+
+def test_get_session_deletes_expired():
+    store, service = make_store()
+
+    store.put_session(
+        "old",
+        {"uid": "42", "name": "x", "guilds": ["1"], "exp": int(NOW.timestamp()) - 1},
+        NOW,
+    )
+    assert store.get_session("old", NOW) is None
+    rows = service.list_entities(store.state_table)
+    assert not any(row["RowKey"] == "old" for row in rows)
+
+
+def test_get_session_unknown_returns_none():
+    store, _ = make_store()
+    assert store.get_session("", NOW) is None
+    assert store.get_session("missing", NOW) is None
+
+
+def test_delete_session_and_prune():
+    store, service = make_store()
+
+    store.put_session("live", {"uid": "1", "name": "a", "guilds": [], "exp": 9999999999}, NOW)
+    store.put_session(
+        "dead", {"uid": "1", "name": "a", "guilds": [], "exp": int(NOW.timestamp()) - 1}, NOW
+    )
+
+    removed = store.prune_sessions(NOW)
+    assert removed == 1
+    rows = service.list_entities(store.state_table)
+    keys = {row["RowKey"] for row in rows}
+    assert "live" in keys
+    assert "dead" not in keys
+
+    store.delete_session("live")
+    keys = {row["RowKey"] for row in service.list_entities(store.state_table)}
+    assert "live" not in keys

@@ -1,28 +1,23 @@
 """Discord OAuth2 によるサーバー設定フロー（旧 /setup の代替）。
 
 HTTP Interactions には「3秒以内の応答」というハードな制約があり、
-スケールゼロのサーバーレスと相性が悪い（インスタンス再確保の待ち時間で
-応答が間に合わないことがある）。設定フローをブラウザ経由の OAuth2 に
-移すことで、その制約そのものを消す。
+スケールゼロのサーバーレスと相性が悪い（deferReply でも ACK 前の
+インスタンス起動待ちは解消できないことを実測で確認済み）。
+設定フローをブラウザ経由の OAuth2 に移すことで、その制約そのものを消す。
 
 - 認可: scope=identify guilds（ユーザー本人と、管理権限のあるサーバー一覧）
 - コールバックでコードをアクセストークンに交換して **1回だけ使う**。
   保存しないので、リフレッシュトークンの管理は不要。
 - CSRF 対策: state（ランダム）をクッキーとクエリで照合。
-- サーバー側セッション: 15分有効の HMAC 署名付きクッキー
-  （ユーザーIDと、認可時に管理権限があったサーバーIDのリスト）。
+- サーバー側セッション: ランダム ID をクッキーに持ち、ユーザー情報と
+  管理権限のあるサーバーIDは Table に保存する（クッキーを小さく保つ。
+  サーバー数が多いとクッキー上限を超えてブラウザに破棄されるため）。
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import json
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any
 from urllib.parse import urlencode
 
 import requests
@@ -59,6 +54,16 @@ def authorize_url(client_id: str, redirect_uri: str, state: str) -> str:
 
 def make_state() -> str:
     return secrets.token_hex(16)
+
+
+def make_session_id() -> str:
+    """クッキーに載せる不透明なセッションID（数十バイト）。"""
+    return secrets.token_urlsafe(18)
+
+
+def session_expiry(now: float | None = None) -> int:
+    moment = now if now is not None else time.time()
+    return int(moment) + SESSION_TTL_SECONDS
 
 
 # ------------------------------------------------------------ コード交換・API
@@ -125,55 +130,3 @@ def manageable_guilds(guilds: list[dict]) -> list[dict]:
     return result
 
 
-# ---------------------------------------------------------------- 署名セッション
-def _sign(secret: bytes, payload: bytes) -> bytes:
-    return hmac.new(secret, payload, hashlib.sha256).digest()
-
-
-def issue_session(
-    secret: str, *, user_id: str, username: str, guild_ids: list[str], now: float | None = None
-) -> str:
-    """15分有効の署名付きセッショントークンを作る。
-
-    値は base64(json) + "." + base64(hmac)。サーバー側に状態を持たない。
-    """
-    moment = now if now is not None else time.time()
-    payload = json.dumps(
-        {
-            "uid": str(user_id),
-            "name": str(username),
-            "guilds": [str(gid) for gid in guild_ids],
-            "exp": int(moment) + SESSION_TTL_SECONDS,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    body = base64.urlsafe_b64encode(payload)
-    signature = base64.urlsafe_b64encode(_sign(secret.encode("utf-8"), body))
-    return f"{body.decode('ascii')}.{signature.decode('ascii')}"
-
-
-def load_session(secret: str, token: str) -> dict | None:
-    """署名と有効期限を検証して、セッション内容を返す。不正なら None。"""
-    if not token or "." not in token:
-        return None
-    body_part, signature_part = token.split(".", 1)
-    try:
-        body = base64.urlsafe_b64decode(body_part.encode("ascii") + b"==")
-        signature = base64.urlsafe_b64decode(
-            signature_part.encode("ascii") + b"=="
-        )
-    except (ValueError, UnicodeError):
-        return None
-    expected = _sign(secret.encode("utf-8"), base64.urlsafe_b64encode(body))
-    if not hmac.compare_digest(expected, signature):
-        return None
-    try:
-        payload = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if int(payload.get("exp") or 0) < time.time():
-        return None
-    return payload
