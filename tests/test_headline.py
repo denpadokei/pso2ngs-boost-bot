@@ -103,6 +103,34 @@ def test_discover_from_rss_includes_headline_item(tmp_path: Path):
     assert ITEM.link not in fetcher.requested
 
 
+def test_failed_parse_is_retried_next_run(tmp_path: Path):
+    link = "https://youtube.com/live/nodate"
+    rss = """<?xml version="1.0"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<item rdf:about="https://youtube.com/live/nodate">
+<title>NGS ヘッドライン WAVE</title>
+<link>https://youtube.com/live/nodate</link>
+<dc:date>2026-11-17T11:00:00+09:00</dc:date>
+</item>
+</rdf:RDF>"""
+    fetcher = FakeFetcher(
+        {
+            "https://pso2.jp/players/pso2news.xml": rss,
+            link: "<html></html>",
+        }
+    )
+    state = State(tmp_path / "state.json", NOW)
+
+    assert discover_from_rss(fetcher, state, NOW) == []
+    assert state.rss_seen(link) is False  # 解析失敗は既読にしない
+
+    # 次回、配信ページが読めればイベントが作られる
+    fetcher.mapping[link] = load("youtube_headline.html")
+    events = discover_from_rss(fetcher, state, NOW)
+    assert len(events) == 1
+    assert state.rss_seen(link) is True
+
+
 def test_rss_fixture_headline_item_is_detected():
     items = parse_rss(load("pso2news.xml"))
     headlines = [item for item in items if is_headline_item(item)]

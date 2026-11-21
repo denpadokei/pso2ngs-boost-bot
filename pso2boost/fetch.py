@@ -71,7 +71,7 @@ class Fetcher:
                     raise FetchError(f"HTTP {response.status_code}: {url}")
                 # Content-Type に charset が無い場合、requests は ISO-8859-1 と
                 # みなして日本語を文字化けさせる。pso2.jp（と配信ページ）は UTF-8。
-                content_type = getattr(response, "headers", {}).get("Content-Type", "")
+                content_type = (getattr(response, "headers", {}) or {}).get("Content-Type", "")
                 if "charset=" not in content_type.lower():
                     response.encoding = "utf-8"
                 text = response.text

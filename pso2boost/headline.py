@@ -19,6 +19,7 @@ from .tz import JST
 log = logging.getLogger(__name__)
 
 HEADLINE_KEYWORD = "ヘッドライン"
+PROGRAM_KEYWORD = "NGS"
 DEFAULT_DURATION = timedelta(hours=1)
 # 配信ページが読めないときの保険（番組の定型開始時刻）。
 FALLBACK_START_HOUR = 21
@@ -29,7 +30,7 @@ _TITLE_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})")
 
 def is_headline_item(item: FeedItem) -> bool:
     """RSS 項目が NGSヘッドラインの告知かどうか。"""
-    return HEADLINE_KEYWORD in item.title
+    return HEADLINE_KEYWORD in item.title and PROGRAM_KEYWORD in item.title
 
 
 def start_from_page(html: str) -> datetime | None:

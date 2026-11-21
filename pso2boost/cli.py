@@ -203,6 +203,8 @@ def cmd_list(args) -> int:
     calendar = fetch_calendar(fetcher, now)
     schedule_events = parse_schedule_html(html, now, _keywords(), calendar=calendar)
     pso2day = discover_pso2_day(fetcher, now)
+    if not pso2day.ok:
+        log.warning("PSO2の日の情報が既定値です（取得または解析に失敗）")
     events = filter_relevant(merge_events(schedule_events, pso2day.events), now)
     if args.json:
         print(

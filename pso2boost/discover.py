@@ -53,14 +53,18 @@ def discover_from_rss(
             log.warning("記事を取得できませんでした (%s): %s", item.link, exc)
             continue
 
-        state.mark_rss(item.link)
         if headline:
             found_headline = event_from_headline(item, html, now)
-            if found_headline is not None:
-                log.info("RSS から番組を検出: %s", found_headline.label)
-                events.append(found_headline)
+            if found_headline is None:
+                # 解析失敗は既読にしない（次回の RSS ポーリングで再試行する）
+                log.warning("NGSヘッドラインを解析できなかったため再試行します: %s", item.link)
+                continue
+            state.mark_rss(item.link)
+            log.info("RSS から番組を検出: %s", found_headline.label)
+            events.append(found_headline)
             continue
 
+        state.mark_rss(item.link)
         article = parse_article_html(html, item.link, now, calendar)
         found = events_from_article(article)
         if found:
