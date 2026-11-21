@@ -1,0 +1,100 @@
+name: deploy-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cloudflare/**"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Worker tests
+        run: node --test cloudflare/*.test.js
+
+      - name: Deploy Worker
+        id: deploy
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare
+          secrets: |
+            DISCORD_PUBLIC_KEY
+        env:
+          DISCORD_PUBLIC_KEY: ${{ secrets.DISCORD_PUBLIC_KEY }}
+
+      # ここから先は「デプロイ後の Discord 側設定」の自動化。
+      # Interaction Endpoint URL は保存前に Discord が署名付き PING を
+      # 送って検証するため、Worker のデプロイ完了後に実行する。
+      - name: Azure login
+        if: vars.AZURE_FUNCTIONAPP_NAME != ''
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure Discord app (endpoint + /setup command)
+        if: vars.AZURE_FUNCTIONAPP_NAME != ''
+        env:
+          ENDPOINT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          set -euo pipefail
+          url="${ENDPOINT_URL%/}"
+          app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
+          rg="${{ vars.AZURE_RESOURCE_GROUP }}"
+          if [ -n "$rg" ]; then
+            settings=$(az functionapp config appsettings list --name "$app" --resource-group "$rg" -o json)
+          else
+            settings=$(az functionapp config appsettings list --name "$app" -o json)
+          fi
+          token=$(echo "$settings" | jq -r '.[] | select(.name=="DISCORD_BOT_TOKEN") | .value')
+          app_id=$(echo "$settings" | jq -r '.[] | select(.name=="DISCORD_APPLICATION_ID") | .value')
+          if [ -z "$token" ] || [ -z "$app_id" ]; then
+            echo "Azure に Bot 設定が無いため Discord 側の設定をスキップします" >&2
+            exit 0
+          fi
+          echo "::add-mask::$token"
+
+          # Worker が先にデプロイ済みなので、署名付き PING の検証に通る
+          curl -sS -X PATCH "https://discord.com/api/v10/applications/@me" \
+            -H "Authorization: Bot $token" \
+            -H "Content-Type: application/json" \
+            -d "{\"interactions_endpoint_url\":\"$url\"}"
+
+          # cloud/commands.py の SETUP_COMMAND と同じ定義
+          curl -sS -X PUT "https://discord.com/api/v10/applications/$app_id/commands" \
+            -H "Authorization: Bot $token" \
+            -H "Content-Type: application/json" \
+            -d '[
+              {
+                "name": "setup",
+                "description": "ブーストキャンペーンの通知先チャンネルを設定します",
+                "default_member_permissions": "32",
+                "dm_permission": false,
+                "options": [
+                  {
+                    "name": "channel",
+                    "description": "通知を投稿するチャンネル",
+                    "type": 7,
+                    "required": true,
+                    "channel_types": [0, 5]
+                  }
+                ]
+              }
+            ]'
