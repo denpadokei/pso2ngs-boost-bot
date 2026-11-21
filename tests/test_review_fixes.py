@@ -53,6 +53,7 @@ def make_runner_context(store: TableStore, *, api_factory=None):
         store.upsert_guild(GuildConfig(guild_id=gid, channel_id=f"ch-{gid}"))
     fetcher = FakeFetcher({SCHEDULE_URL: "<html></html>", RSS_URL: "<rss></rss>"})
     notifiers: dict[str, FakeNotifier] = {}
+    api_factory = api_factory or (lambda target: FakeApi(target.guild_id))
 
     def run():
         return runner.run_weekly(

@@ -12,6 +12,7 @@ from cloud.runner import resolve_targets, run_weekly
 from cloud.storage import GuildConfig, TableStore
 from fakes import FakeApi, FakeDiscordRest, FakeFetcher, FakeNotifier, FakeTableService
 from pso2boost.fetch import SCHEDULE_URL
+from pso2boost.pso2day import PSO2_DAY_URL
 from pso2boost.rss import RSS_URL
 from pso2boost.schedule import DEFAULT_KEYWORDS
 from pso2boost.tz import JST
@@ -31,6 +32,7 @@ def make_fetcher() -> FakeFetcher:
             SCHEDULE_URL: load("schedule.html"),
             RSS_URL: load("pso2news.xml"),
             ARTICLE_URL: load("article_32486.html"),
+            PSO2_DAY_URL: load("article_31542.html"),
         }
     )
 
@@ -114,8 +116,24 @@ def test_pso2_pages_are_fetched_once_for_two_guilds():
     run(fetcher=fetcher)
 
     # どの URL も1回しか取得していない（Fetcher のキャッシュ経由）
-    for url in (SCHEDULE_URL, RSS_URL, ARTICLE_URL):
+    for url in (SCHEDULE_URL, RSS_URL, ARTICLE_URL, PSO2_DAY_URL):
         assert fetcher.requested.count(url) == 1, url
+
+
+def test_pso2_day_events_are_included_in_shared_bot():
+    """共有Botでも PSO2の日のレア泥期間がイベント化・通知される。"""
+    store, apis, notifiers, run = make_run([("111", "chan-A", False)])
+
+    summary = run()
+
+    assert summary.failed == 0
+    names = [payload["name"] for payload in apis["111"].created]
+    pso2day = [payload for payload in apis["111"].created if "PSO2の日" in payload["name"]]
+    # 11/1～3 は期限切れで除外され、11/21～23 と12月の2回が残る
+    assert len(pso2day) == 3
+    assert any("レアドロップ倍率+100%" in payload["description"] for payload in pso2day)
+    assert all(PSO2_DAY_URL in payload["description"] for payload in pso2day)
+    assert any(kind == "new" for kind, _, _ in notifiers["111"].sent)
 
 
 def test_guild_failure_does_not_block_others():

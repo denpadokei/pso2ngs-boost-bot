@@ -28,6 +28,7 @@ from pso2boost.fetch import Fetcher, SCHEDULE_URL, FetchError
 from pso2boost.maintenance import MaintenanceCalendar, fetch_calendar
 from pso2boost.models import BoostEvent, merge_events
 from pso2boost.notify import DiscordNotifier
+from pso2boost.pso2day import discover_pso2_day
 from pso2boost.schedule import DEFAULT_KEYWORDS, filter_relevant, parse_schedule_html
 from pso2boost.service import PlannedAction, enrich_event, plan_actions
 from pso2boost.state import State
@@ -123,7 +124,10 @@ def discover_events(
     pso2.jp への取得はサーバー数によらず1回で済む。
     """
     rss_events = discover_from_rss(fetcher, shared_state, now, calendar=calendar)
-    return filter_relevant(merge_events(schedule_events, rss_events), now)
+    pso2day = discover_pso2_day(fetcher, now)
+    return filter_relevant(
+        merge_events(merge_events(schedule_events, rss_events), pso2day.events), now
+    )
 
 
 def prepare_guild(
