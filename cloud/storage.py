@@ -28,6 +28,7 @@ LOCK_ROW = "weekly"
 LOCK_TTL_SECONDS = 10 * 60
 EVENT_ROW_PREFIX = "event:"
 RSS_ROW_PREFIX = "rss:"
+EVENT_SNAPSHOT_ROW = "event_snapshot"
 
 LAST_ERROR_MAX = 200
 
@@ -454,4 +455,45 @@ class TableStore:
             self._service.upsert_entity(self.state_table, row)
         # state.prune() で消えた行を掃除する（終了後の残骸を放置しない）
         for stale in existing - {str(row["RowKey"]) for row in rows}:
+            if stale == EVENT_SNAPSHOT_ROW:
+                continue  # 共有イベントキャッシュは state の掃除対象外
             self._service.delete_entity(self.state_table, guild_id, stale)
+
+    # ------------------------------------------------------------- event cache
+    def save_event_snapshot(self, payload: dict, now: datetime) -> None:
+        """直近に取得したイベント一覧を全サーバー共有で保存する。
+
+        ``/sync`` が複数サーバーから呼ばれても pso2.jp への取得を1回に抑えるため。
+        """
+        self._service.upsert_entity(
+            self.state_table,
+            {
+                "PartitionKey": SHARED_PARTITION,
+                "RowKey": EVENT_SNAPSHOT_ROW,
+                "payload": json.dumps(payload, ensure_ascii=False),
+                "fetched_at": now.isoformat(),
+            },
+        )
+
+    def load_event_snapshot(self, now: datetime, ttl_seconds: int) -> dict | None:
+        """``ttl_seconds`` 以内に保存されたイベント一覧を返す（古ければ None）。"""
+        if ttl_seconds <= 0:
+            return None
+        rows = self._service.list_entities(
+            self.state_table, query=f"PartitionKey eq '{SHARED_PARTITION}'"
+        )
+        row = next(
+            (r for r in rows if str(r.get("RowKey", "")) == EVENT_SNAPSHOT_ROW), None
+        )
+        if row is None:
+            return None
+        try:
+            fetched_at = datetime.fromisoformat(str(row["fetched_at"]))
+        except (ValueError, KeyError, TypeError):
+            return None
+        if (now - fetched_at).total_seconds() > ttl_seconds:
+            return None
+        try:
+            return json.loads(str(row["payload"]))
+        except (ValueError, KeyError, TypeError):
+            return None

@@ -462,4 +462,7 @@ Azure 側も always-ready を置かずオンデマンドのままなので、従
 - `/setup` と `/sync` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
 - `/sync` は「サーバーを管理」権限限定。呼んだサーバーだけを対象に、取得間隔を 0 にして
   週次バッチを即時実行する（Worker の転送タイムアウト 20 秒以内に収めるため）
+- 取得したイベント一覧は `state` テーブルの `_shared` パーティションに10分間キャッシュし、
+  各サーバーからの `/sync` で再利用する。これにより複数サーバーから同時／連続で呼ばれても
+  pso2.jp への取得は実質1回（排他ロック＋スナップショットの二重保護）
 - テスト: `node --test cloudflare/*.test.js` と `python -m pytest -q tests/test_interactions.py`

@@ -128,6 +128,61 @@ def test_pso2_pages_are_fetched_once_for_two_guilds():
         assert fetcher.requested.count(url) == 1, url
 
 
+def test_snapshot_reuses_events_without_fetching_again():
+    """直近の取得結果は共有され、2回目はサイトへアクセスしない。"""
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    api = FakeApi("111")
+    notifier = FakeNotifier("chan-A")
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: api,
+        notifier_factory=lambda target: notifier,
+    )
+
+    first = run_weekly(**kwargs)
+    assert first.guilds == 1
+    assert fetcher.requested  # 初回はサイトを取得
+
+    fetcher.requested.clear()
+    second = run_weekly(**kwargs)
+
+    assert fetcher.requested == []  # 2回目はスナップショットを再利用
+    assert second.notified == 0  # 二重通知しない
+
+
+def test_snapshot_ttl_zero_forces_refetch():
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: FakeApi("111"),
+        notifier_factory=lambda target: FakeNotifier("chan-A"),
+    )
+
+    run_weekly(**kwargs)
+    fetcher.requested.clear()
+    run_weekly(**kwargs, snapshot_ttl=0)
+
+    assert fetcher.requested  # キャッシュ無効なら再取得する
+
+
 def test_run_weekly_can_limit_to_single_guild():
     """``/sync`` 用に対象サーバーを限定できる。"""
     store, apis, notifiers, run = make_run(

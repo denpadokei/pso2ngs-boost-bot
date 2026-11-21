@@ -37,6 +37,7 @@ from pso2boost.tz import now_jst
 
 from .config import CloudConfig
 from .discord import DiscordRest, DiscordRestError
+from .snapshot import decode_events, encode_events
 from .storage import GuildConfig, LAST_ERROR_MAX, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)
@@ -302,6 +303,7 @@ def run_weekly(
     api_factory: Callable[[GuildTarget], ScheduledEventsApi] | None = None,
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
     guild_ids: list[str] | None = None,
+    snapshot_ttl: int = 600,
 ) -> RunSummary:
     """Timer から呼ばれる週次バッチの入口。
 
@@ -309,6 +311,9 @@ def run_weekly(
     GuildResult に閉じ込めて他サーバーへ影響させない。
 
     ``guild_ids`` を渡すと対象サーバーをそのIDに限定する（``/sync`` 用）。
+
+    ``snapshot_ttl`` 秒以内に取得したイベント一覧があれば再利用する。
+    ``/sync`` が各サーバーから呼ばれても pso2.jp への取得を1回に抑えるため。
     """
     now = now or now_jst()
     summary = RunSummary()
@@ -352,19 +357,28 @@ def run_weekly(
             return summary
 
         fetcher = fetcher or Fetcher(delay=config.delay)
+        fresh = False
         try:
-            calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
-            # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
-            shared_state = store.load_state(SHARED_PARTITION, now)
-            events, pso2day_ok = discover_events(
-                fetcher, shared_state, now, schedule_events, calendar
-            )
-            if not pso2day_ok:
-                message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
-                summary.actions.append(message)
-                log.warning(message)
-                degraded = True
-            store.save_state(SHARED_PARTITION, shared_state)
+            snapshot = store.load_event_snapshot(now, snapshot_ttl)
+            if snapshot is not None:
+                # 直近の取得結果を再利用（各サーバーからの /sync で再取得しない）
+                events = decode_events(snapshot)
+                calendar = MaintenanceCalendar()
+                log.info("共有スナップショットを再利用: %d 件", len(events))
+            else:
+                calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
+                # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
+                shared_state = store.load_state(SHARED_PARTITION, now)
+                events, pso2day_ok = discover_events(
+                    fetcher, shared_state, now, schedule_events, calendar
+                )
+                if not pso2day_ok:
+                    message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
+                    summary.actions.append(message)
+                    log.warning(message)
+                    degraded = True
+                store.save_state(SHARED_PARTITION, shared_state)
+                fresh = True
         except FetchError as exc:
             message = f"PSO2 データの取得に失敗: {exc}"
             summary.actions.append(message)
@@ -392,12 +406,18 @@ def run_weekly(
                     )
                 )
         # 記事本文の取得もメインスレッドで1回だけ（イベントは全サーバー共通のオブジェクト）
+        # スナップショット再利用時は詳細取得済みなので、サイトへ再アクセスしない
         enriched: set[str] = set()
-        for work in works:
-            for action in work.actions:
-                if action.event.key not in enriched:
-                    enrich_event(action.event, fetcher, now)
-                    enriched.add(action.event.key)
+        if fresh:
+            for work in works:
+                for action in work.actions:
+                    if action.event.key not in enriched:
+                        enrich_event(action.event, fetcher, now)
+                        enriched.add(action.event.key)
+            try:
+                store.save_event_snapshot(encode_events(events), now)
+            except Exception as exc:
+                log.warning("イベントスナップショットの保存に失敗（次回は再取得）: %s", exc)
 
         def run_one(work: GuildWork) -> GuildResult:
             try:
