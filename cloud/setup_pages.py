@@ -233,11 +233,15 @@ def channels(
             )
         return Page(200, _error_page(f"チャンネル一覧を取得できませんでした: {exc}"))
 
+    # ロール情報はチャンネル一覧で1回だけ取得する（N+1 の REST 呼び出しを避ける）
+    role_info = permissions.bot_roles(discord, guild_id)
+
     def label(channel: dict) -> str:
         name = html.escape(str(channel.get("name") or channel.get("id")))
-        perms = permissions.effective_channel_permissions(discord, guild_id, channel)
-        if perms is None:
+        if role_info is None:
             return f"#{name}"
+        role_ids, roles = role_info
+        perms = permissions.permissions_for(guild_id, role_ids, roles, channel)
         return f"#{name}" + ("" if can_send_messages(perms) else "（投稿権限なし）")
 
     options = "\n".join(
@@ -366,14 +370,17 @@ def save(
     perms = permissions.effective_channel_permissions(discord, guild_id, channel)
     permissions_ok = True
     warning = ""
-    if perms is not None:
-        if not can_send_messages(perms):
-            permissions_ok = False
-            warning = (
-                "⚠️ Bot に「メッセージを送信」権限がありません。"
-                "チャンネルの権限設定で NGSEvent に送信を許可するか、"
-                "別のチャンネルを選んでください（このままでは通知が届きません）。"
-            )
+    if perms is None:
+        # 判定不能を「権限確認済み」と保存しない（/setup 経由と同じ扱い）
+        permissions_ok = False
+        warning = "⚠️ Bot の権限を確認できませんでした。投稿されない場合は招待し直してください。"
+    elif not can_send_messages(perms):
+        permissions_ok = False
+        warning = (
+            "⚠️ Bot に「メッセージを送信」権限がありません。"
+            "チャンネルの権限設定で NGSEvent に送信を許可するか、"
+            "別のチャンネルを選んでください（このままでは通知が届きません）。"
+        )
 
     try:
         store.ensure_tables()

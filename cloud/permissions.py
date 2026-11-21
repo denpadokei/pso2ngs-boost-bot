@@ -28,6 +28,15 @@ def bot_roles(discord: Any, guild_id: str) -> tuple[set[str], list[dict]] | None
     return {str(role) for role in member.get("roles") or []}, roles
 
 
+def permissions_for(
+    guild_id: str, role_ids: set[str], roles: list[dict], channel: dict
+) -> int:
+    """既に取得済みのロール情報から、チャンネルの実効権限を計算する。"""
+    return compute_channel_permissions(
+        guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
+    )
+
+
 def effective_channel_permissions(
     discord: Any, guild_id: str, channel: dict
 ) -> int | None:
@@ -36,6 +45,4 @@ def effective_channel_permissions(
     if info is None:
         return None
     role_ids, roles = info
-    return compute_channel_permissions(
-        guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
-    )
+    return permissions_for(guild_id, role_ids, roles, channel)

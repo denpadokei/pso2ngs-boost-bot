@@ -62,9 +62,14 @@ def verify_signature(
 
     try:
         key_bytes = bytes.fromhex(public_key_hex)
+    except (ValueError, TypeError):
+        log.error("DISCORD_PUBLIC_KEY の hex 形式が不正です")
+        return False
+    try:
         signature_bytes = bytes.fromhex(signature_hex)
     except (ValueError, TypeError):
-        log.error("DISCORD_PUBLIC_KEY または署名の hex 形式が不正です")
+        # 公開エンドポイントへ直接送られた不正入力なので warning に留める
+        log.warning("署名の hex 形式が不正です")
         return False
     try:
         verify_key = VerifyKey(key_bytes)

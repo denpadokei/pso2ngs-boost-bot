@@ -574,4 +574,5 @@ def test_save_succeeds_when_permission_lookup_fails():
     )
 
     assert "✅" in page.body
-    assert {g.guild_id: g for g in store.list_guilds()}["111"].permissions_ok is True
+    assert "権限を確認できませんでした" in page.body
+    assert {g.guild_id: g for g in store.list_guilds()}["111"].permissions_ok is False

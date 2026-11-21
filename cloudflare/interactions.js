@@ -136,7 +136,7 @@ async function forward(env, rawBody, signature, timestamp, token) {
         env,
         token,
         saved
-          ? "✅ 設定は保存されました（結果の表示更新に失敗しました）"
+          ? "✅ 設定は保存されました"
           : errorMessage(response.status),
       );
     }
