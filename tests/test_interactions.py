@@ -97,6 +97,14 @@ def secret():
     return SigningKey.generate()
 
 
+def test_is_valid_public_key():
+    assert interactions.is_valid_public_key("ab" * 32) is True
+    assert interactions.is_valid_public_key("") is False
+    assert interactions.is_valid_public_key("abc") is False
+    assert interactions.is_valid_public_key("zz" * 32) is False
+    assert interactions.is_valid_public_key("ab" * 31) is False
+
+
 def test_verify_signature(secret):
     body, headers = signed(secret, {"type": 1})
     assert interactions.verify_signature(
@@ -185,6 +193,26 @@ def test_process_deferred_warns_about_selected_channel_permission(secret):
     assert "✅" in message
     assert "権限が足りません" in message
     assert "メッセージを送信" in message
+    assert store.list_guilds()[0].permissions_ok is False
+
+
+def test_process_deferred_does_not_claim_unverified_permissions(secret):
+    class NoPermissionsDiscord(FakeDiscord):
+        def get_me(self):
+            raise RuntimeError("temporary Discord failure")
+
+    body, headers = signed(secret, payload())
+    store = TableStore("", service=FakeTableService())
+
+    _, message = interactions.process_deferred(
+        body=body,
+        headers=headers,
+        config=config(secret.verify_key.encode().hex()),
+        store=store,
+        discord=NoPermissionsDiscord(),
+    )
+
+    assert "権限を確認できませんでした" in message
     assert store.list_guilds()[0].permissions_ok is False
 
 

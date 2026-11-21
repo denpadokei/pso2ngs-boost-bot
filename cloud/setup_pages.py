@@ -23,14 +23,9 @@ import requests
 from pso2boost.discord_events import RECOMMENDED_PERMISSIONS
 from pso2boost.lookup import TEXT_CHANNEL_TYPES
 
-from . import oauth
+from . import oauth, permissions
 from .config import CloudConfig
-from .discord import (
-    DiscordRest,
-    DiscordRestError,
-    can_send_messages,
-    compute_channel_permissions,
-)
+from .discord import DiscordRest, DiscordRestError, can_send_messages
 from .storage import GuildConfig, TableStore
 from pso2boost.tz import now_jst
 
@@ -203,16 +198,6 @@ def callback(
 
 
 # ------------------------------------------------------------------ 3. チャンネル
-def _bot_permissions(
-    discord: DiscordRest, guild_id: str
-) -> tuple[set[str], list[dict]] | None:
-    """Bot のロールIDとギルドのロール一覧（取得できなければ None）。"""
-    # 権限確認はベストエフォート（失敗しても選択は続行）
-    from .permissions import bot_roles
-
-    return bot_roles(discord, guild_id)
-
-
 def channels(
     config: CloudConfig,
     store: TableStore,
@@ -248,16 +233,11 @@ def channels(
             )
         return Page(200, _error_page(f"チャンネル一覧を取得できませんでした: {exc}"))
 
-    permission_info = _bot_permissions(discord, guild_id)
-
     def label(channel: dict) -> str:
         name = html.escape(str(channel.get("name") or channel.get("id")))
-        if permission_info is None:
+        perms = permissions.effective_channel_permissions(discord, guild_id, channel)
+        if perms is None:
             return f"#{name}"
-        role_ids, roles = permission_info
-        perms = compute_channel_permissions(
-            guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
-        )
         return f"#{name}" + ("" if can_send_messages(perms) else "（投稿権限なし）")
 
     options = "\n".join(
@@ -383,14 +363,10 @@ def save(
         return Page(400, _error_page("テキストチャンネルを指定してください。"))
 
     now = now_jst()
-    permission_info = _bot_permissions(discord, guild_id)
+    perms = permissions.effective_channel_permissions(discord, guild_id, channel)
     permissions_ok = True
     warning = ""
-    if permission_info is not None:
-        role_ids, roles = permission_info
-        perms = compute_channel_permissions(
-            guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
-        )
+    if perms is not None:
         if not can_send_messages(perms):
             permissions_ok = False
             warning = (

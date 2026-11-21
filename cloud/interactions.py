@@ -61,10 +61,14 @@ def verify_signature(
     from nacl.signing import VerifyKey
 
     try:
-        verify_key = VerifyKey(bytes.fromhex(public_key_hex))
-        verify_key.verify(
-            timestamp.encode("utf-8") + body, bytes.fromhex(signature_hex)
-        )
+        key_bytes = bytes.fromhex(public_key_hex)
+        signature_bytes = bytes.fromhex(signature_hex)
+    except (ValueError, TypeError):
+        log.error("DISCORD_PUBLIC_KEY または署名の hex 形式が不正です")
+        return False
+    try:
+        verify_key = VerifyKey(key_bytes)
+        verify_key.verify(timestamp.encode("utf-8") + body, signature_bytes)
         return True
     except (BadSignatureError, ValueError, TypeError):
         return False
@@ -100,9 +104,13 @@ def edit_original_response(
         response = session.patch(
             url, json={"content": content[:2000]}, timeout=timeout
         )
-    except requests.RequestException:
-        # 例外文にはトークン付き URL が含まれるため、詳細はログに出さない
-        log.error("interaction の差し替えに失敗しました")
+    except requests.RequestException as exc:
+        # 例外文にはトークン付き URL が含まれるため、種別と末尾だけ残す
+        log.error(
+            "interaction PATCH 失敗: %s (token ..%s)",
+            type(exc).__name__,
+            token[-8:],
+        )
         return False
     if response.status_code >= 400:
         log.error("interaction の差し替えに失敗: HTTP %s", response.status_code)
@@ -172,12 +180,9 @@ def handle_application_command(
     # app_permissions は「コマンドを呼んだ場所」の権限であって通知先ではない。
     # OAuth フローと同じヘルパーで、選択されたチャンネルの実効権限を求める。
     effective = effective_channel_permissions(discord, guild_id, channel)
-    if effective is None:
-        # 判定不能なら誤警告しない（週次実行時に last_error で気づく）
-        log.warning("選択チャンネルの権限を判定できないため警告を省略: %s", guild_id)
-        permissions_ok = True
-    else:
-        permissions_ok = can_send_messages(effective)
+    permission_unknown = effective is None
+    # 判定できなかったことを「確認済み」と記録しない
+    permissions_ok = can_send_messages(effective) if effective is not None else False
 
     store = store or TableStore(config.storage_connection)
     now = now_jst()
@@ -207,9 +212,12 @@ def handle_application_command(
         f"✅ 通知先を #{channel.get('name') or guild.channel_id} に設定しました\n"
         "次回実行: 毎週水曜 13:00 (JST)"
     )
-    missing = ((1 << 10) | (1 << 11)) & ~effective if effective is not None else 0
-    if not permissions_ok and missing:
-        message += _odd_permissions_message(missing)
+    if permission_unknown:
+        message += "\n⚠️ Bot の権限を確認できませんでした。投稿されない場合は招待し直してください。"
+    else:
+        missing = ((1 << 10) | (1 << 11)) & ~effective
+        if not permissions_ok and missing:
+            message += _odd_permissions_message(missing)
     return message
 
 
@@ -240,6 +248,7 @@ def process_deferred(
     except (TypeError, ValueError):
         issued_at = 0
     if abs(time.time() - issued_at) > 300:
+        log.warning("stale signature rejected: %s", timestamp)
         raise SignatureError("stale request signature")
 
     try:

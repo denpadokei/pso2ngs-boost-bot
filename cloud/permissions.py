@@ -20,8 +20,10 @@ def bot_roles(discord: Any, guild_id: str) -> tuple[set[str], list[dict]] | None
         me = discord.get_me()
         member = discord.get_guild_member(guild_id, str(me.get("id") or ""))
         roles = discord.get_guild_roles(guild_id)
-    except Exception as exc:
-        log.warning("Bot の権限情報を取得できませんでした: %s", type(exc).__name__)
+    except Exception:
+        log.warning(
+            "ギルド %s の Bot 権限情報を取得できませんでした", guild_id, exc_info=True
+        )
         return None
     return {str(role) for role in member.get("roles") or []}, roles
 

@@ -130,7 +130,15 @@ async function forward(env, rawBody, signature, timestamp, token) {
     });
     if (!response.ok) {
       logFailure(token, "Azure deferred returned", response.status);
-      await patchWithRetry(env, token, errorMessage(response.status));
+      // 409 = 設定は保存済みで表示更新だけ失敗した場合
+      const saved = response.headers.get("X-Setup-Saved") === "true";
+      await patchWithRetry(
+        env,
+        token,
+        saved
+          ? "✅ 設定は保存されました（結果の表示更新に失敗しました）"
+          : errorMessage(response.status),
+      );
     }
   } catch (error) {
     logFailure(token, "Azure deferred failed", error);
@@ -164,6 +172,7 @@ export default {
       !Number.isFinite(issuedAt) ||
       Math.abs(Date.now() / 1000 - issuedAt) > 300
     ) {
+      console.error("stale signature rejected", timestamp);
       return json({ error: "stale request signature" }, 401);
     }
 

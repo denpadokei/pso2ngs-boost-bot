@@ -102,7 +102,12 @@ def interactions_deferred(req: func.HttpRequest) -> func.HttpResponse:
     if not discord_interactions.edit_original_response(
         config.client_id, token, message
     ):
-        return func.HttpResponse("failed to edit response", status_code=502)
+        # 設定自体は保存済み。Worker が「失敗」と上書きしないよう区別する
+        return func.HttpResponse(
+            "failed to edit response",
+            status_code=409,
+            headers={"X-Setup-Saved": "true"},
+        )
     return func.HttpResponse("ok", status_code=200)
 
 

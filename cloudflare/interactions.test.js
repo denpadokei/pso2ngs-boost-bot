@@ -244,6 +244,39 @@ test("permanent Azure config errors tell the user to contact an admin", async ()
   assert.match(patchBody.content, /管理者に連絡してください/);
 });
 
+test("saved-but-display-failed keeps the success message", async () => {
+  const { pair, publicKeyHex } = await keypair();
+  const body = encoder.encode(JSON.stringify({ type: 2, token: "tok" }));
+  const timestamp = nowStamp();
+  const signature = await sign(pair, timestamp, body);
+  const ctx = fakeCtx();
+  let patchBody;
+
+  await withFetch(
+    async (url, init) => {
+      if (String(url).includes("azure")) {
+        return new Response("failed to edit response", {
+          status: 409,
+          headers: { "X-Setup-Saved": "true" },
+        });
+      }
+      patchBody = JSON.parse(init.body);
+      return new Response("ok", { status: 200 });
+    },
+    async () => {
+      await worker.fetch(interactionRequest(body, signature, timestamp), {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_APPLICATION_ID: "app-id",
+        AZURE_DEFERRED_URL: "https://azure.example.com/api/interactions/deferred",
+      }, ctx);
+      await ctx.pending[0];
+    },
+  );
+
+  assert.match(patchBody.content, /設定は保存されました/);
+  assert.doesNotMatch(patchBody.content, /失敗しました。しばらく/);
+});
+
 test("unsupported interaction types are rejected without deferring", async () => {
   const { pair, publicKeyHex } = await keypair();
   const body = encoder.encode(JSON.stringify({ type: 4, token: "tok" }));

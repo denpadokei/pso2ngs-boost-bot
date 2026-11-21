@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "cloudflare/**"
+      - "cloud/commands.py"
       - ".github/workflows/deploy-worker.yml"
   workflow_dispatch:
 
@@ -89,12 +90,18 @@ jobs:
               echo "::error::Discord の Interactions Endpoint URL 設定に失敗しました"
               exit 1
             }
-          echo "$response" | jq -e --arg url "$url" '.interactions_endpoint_url == $url' >/dev/null || {
-            echo "::error::Discord 側の endpoint 設定が反映されていません"
+          # PATCH レスポンスの形に依存せず、GET で実際の設定値を確認する
+          current=$(curl -fsS "https://discord.com/api/v10/applications/@me" \
+            -H "Authorization: Bot $token" | jq -r '.interactions_endpoint_url')
+          [ "$current" = "$url" ] || {
+            echo "::error::Discord 側の endpoint 設定が反映されていません (${current:-empty})"
             exit 1
           }
 
-          # コマンド定義は cloud/commands.py の 1 箇所に集約する
+          # コマンド定義は cloud/commands.py の 1 箇所に集約する。
+          # PEP 668 の externally-managed Python を避けるため venv を使う。
+          python -m venv .venv-worker
+          . .venv-worker/bin/activate
           python -m pip install --quiet requests
           DISCORD_BOT_TOKEN="$token" DISCORD_APPLICATION_ID="$app_id" python -m cloud.commands || {
             echo "::error::/setup コマンドの登録に失敗しました"
