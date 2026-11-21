@@ -40,6 +40,8 @@ jobs:
     if: vars.AZURE_FUNCTIONAPP_NAME != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      DISCORD_PUBLIC_KEY: ${{ secrets.DISCORD_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +61,26 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Worker と同じ公開鍵を Azure 側にも置く（deferred で署名再検証する）。
+      # GitHub Secret が未設定なら何もしない。
+      - name: Set DISCORD_PUBLIC_KEY
+        if: env.DISCORD_PUBLIC_KEY != ''
+        run: |
+          set -euo pipefail
+          app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
+          rg="${{ vars.AZURE_RESOURCE_GROUP }}"
+          if [ -n "$rg" ]; then
+            az functionapp config appsettings set --name "$app" --resource-group "$rg" \
+              --settings "DISCORD_PUBLIC_KEY=$DISCORD_PUBLIC_KEY" -o none
+          else
+            az functionapp config appsettings set --name "$app" \
+              --settings "DISCORD_PUBLIC_KEY=$DISCORD_PUBLIC_KEY" -o none
+          fi
+
+      - name: Warn when DISCORD_PUBLIC_KEY is missing
+        if: env.DISCORD_PUBLIC_KEY == ''
+        run: echo "::warning::DISCORD_PUBLIC_KEY が未設定のため deferred 署名検証が構成されません"
 
       # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）。
       # App Service Plan の読み取りは Website Contributor の権限外、

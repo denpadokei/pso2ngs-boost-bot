@@ -24,14 +24,9 @@ import requests
 from pso2boost.discord_events import RECOMMENDED_PERMISSIONS
 from pso2boost.lookup import TEXT_CHANNEL_TYPES
 
-from . import oauth
+from . import oauth, permissions
 from .config import CloudConfig
-from .discord import (
-    DiscordRest,
-    DiscordRestError,
-    can_send_messages,
-    compute_channel_permissions,
-)
+from .discord import DiscordRest, DiscordRestError, can_send_messages
 from .storage import GuildConfig, TableStore
 from pso2boost.tz import now_jst
 
@@ -226,24 +221,6 @@ def callback(
 
 
 # ------------------------------------------------------------------ 3. チャンネル
-def _bot_permissions(
-    discord: DiscordRest, guild_id: str
-) -> tuple[set[str], list[dict]] | None:
-    """Bot のロールIDとギルドのロール一覧（取得できなければ None）。"""
-    try:
-        me = discord.get_me()
-        member = discord.get_guild_member(guild_id, str(me.get("id") or ""))
-        roles = discord.get_guild_roles(guild_id)
-    except (DiscordRestError, requests.RequestException) as exc:
-        log.warning("Bot の権限確認に失敗しました (guild=%s): %s", guild_id, exc)
-        return None  # ベストエフォート（判定不能であることは呼び出し側で表示する）
-    except Exception as exc:
-        log.exception("Bot の権限確認で予期しないエラー (guild=%s)", guild_id)
-        return None
-    role_ids = {str(role) for role in member.get("roles") or []}
-    return role_ids, roles
-
-
 def channels(
     config: CloudConfig,
     store: TableStore,
@@ -279,22 +256,21 @@ def channels(
             )
         return Page(200, _error_page(f"チャンネル一覧を取得できませんでした: {exc}"))
 
-    permission_info = _bot_permissions(discord, guild_id)
+    # ロール情報はチャンネル一覧で1回だけ取得する（N+1 の REST 呼び出しを避ける）
+    role_info = permissions.bot_roles(discord, guild_id)
     permission_note = (
         '<p class="error">⚠️ Bot の権限を確認できませんでした。'
         "投稿できないチャンネルがあるかもしれません。</p>"
-        if permission_info is None
+        if role_info is None
         else ""
     )
 
     def label(channel: dict) -> str:
         name = html.escape(str(channel.get("name") or channel.get("id")))
-        if permission_info is None:
+        if role_info is None:
             return f"#{name}"
-        role_ids, roles = permission_info
-        perms = compute_channel_permissions(
-            guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
-        )
+        role_ids, roles = role_info
+        perms = permissions.permissions_for(guild_id, role_ids, roles, channel)
         return f"#{name}" + ("" if can_send_messages(perms) else "（投稿権限なし）")
 
     options = "\n".join(
@@ -430,28 +406,23 @@ def save(
         return Page(400, _error_page("テキストチャンネルを指定してください。"))
 
     now = now_jst()
-    permission_info = _bot_permissions(discord, guild_id)
+    perms = permissions.effective_channel_permissions(discord, guild_id, channel)
     permissions_ok = True
     warning = ""
-    if permission_info is None:
+    if perms is None:
         # 確認できなかったのに True と捏造すると、403 が黙って繰り返される
         permissions_ok = False
         warning = (
             "⚠️ Bot の権限を確認できませんでした。"
             "通知が届かない可能性があります（チャンネル権限をご確認ください）。"
         )
-    else:
-        role_ids, roles = permission_info
-        perms = compute_channel_permissions(
-            guild_id=guild_id, role_ids=role_ids, roles=roles, channel=channel
+    elif not can_send_messages(perms):
+        permissions_ok = False
+        warning = (
+            "⚠️ Bot に「メッセージを送信」権限がありません。"
+            "チャンネルの権限設定で NGSEvent に送信を許可するか、"
+            "別のチャンネルを選んでください（このままでは通知が届きません）。"
         )
-        if not can_send_messages(perms):
-            permissions_ok = False
-            warning = (
-                "⚠️ Bot に「メッセージを送信」権限がありません。"
-                "チャンネルの権限設定で NGSEvent に送信を許可するか、"
-                "別のチャンネルを選んでください（このままでは通知が届きません）。"
-            )
 
     try:
         store.ensure_tables()

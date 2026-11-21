@@ -18,7 +18,8 @@ DisCal のような「イベント告知 + カレンダー運用」を、この�
 > （初回に現在の予定が通知され、Discord 側にイベントが無ければ自動で作り直します）。
 
 1つの Bot を複数サーバーに配る「共有Bot」として運用する場合の設計は
-[docs/shared-bot.md](docs/shared-bot.md) にまとめています（OAuth なし・Azure Functions）。
+[docs/shared-bot.md](docs/shared-bot.md) にまとめています（OAuth 設定フロー ＋
+Azure Functions の週次バッチ ＋ Cloudflare Workers の即 ACK プロキシ）。
 
 ## 仕組み
 

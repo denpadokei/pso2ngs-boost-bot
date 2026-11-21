@@ -358,7 +358,7 @@ docs/shared-bot.md       # この設計書
 - ユーザーアクセストークンはコールバックで1回だけ使う（保存しない）ため、
   当初懸念していた「トークン更新の管理」は実質不要になった
 - 旧 `/setup` コマンド・interactions エンドポイント・keep-alive・コマンド登録は
-  すべて廃止した
+  すべて廃止した（その後、§17 の Workers 前段方式で `/setup` のみ復活）
 
 ## 16. 実装メモ（2026-11 実装時の判断）
 
@@ -409,3 +409,55 @@ docs/shared-bot.md       # この設計書
   `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:refs/heads/<branch>` 形式の `sub` を
   提示する（2026-11 実測。ID なしの旧形式では AADSTS700213 になる）。
   §10 の注意書きを参照。
+
+## 17. Cloudflare Workers 即 ACK プロキシ（2026-11 追加）
+
+OAuth 方式で 3 秒制約は消えたが、**`/setup` のスラッシュコマンド UX を 0 円で
+取り戻す**ため、Discord と Azure Functions の間に Workers を 1 枚挟む方式を採用した。
+
+```mermaid
+flowchart LR
+  U[サーバー管理者] -->|/setup #channel| D[Discord]
+  D -->|Interactions POST| W[Cloudflare Worker]
+  W -->|type 5 を即返す| D
+  W -->|ctx.waitUntil: 生ボディ＋署名| F[Azure /api/interactions/deferred]
+  F -->|署名再検証・保存| T[(Table Storage)]
+  F -->|PATCH @original| D
+```
+
+### 役割分担
+
+| 層 | 担当 |
+|---|---|
+| Worker | Ed25519 署名検証、PING 応答、`type: 5`（defer）の即時返却、生ボディ転送、転送失敗時のエラー PATCH |
+| Azure Function | 署名再検証、`/setup` の権限・チャンネル検証、Table 保存、結果本文の PATCH |
+
+Worker には Bot トークンも状態も置かない。状態・権限ロジックは Python 側の
+1 箇所に残すため、OAuth フローと二重実装にならない。
+
+### 3 秒制約が消える理由
+
+Worker は V8 Isolate 上で動き、コンテナのブートがない。署名検証（WebCrypto
+Ed25519）と JSON パースだけなら CPU 1ms 以下で、Discord への `type: 5` 応答は
+数十 ms で出る。Azure がコールドスタートしても、Discord は既に「考え中…」を
+表示しているので制約を満たした状態で待てる。
+
+`type: 5` の initial レスポンスで使えるフラグは EPHEMERAL(64) のみ。
+フォローアップの PATCH で ephemeral は引き継がれるため、再指定は不要。
+トークン有効は 15 分。`waitUntil` はレスポンス後 30 秒まで。
+
+### コスト
+
+Workers Free は 10 万 req/日・CPU 10ms/呼び出し・期間課金なしで 0 円。
+Azure 側も always-ready を置かずオンデマンドのままなので、従来どおり
+無料枠（25 万実行 / 10 万 GB-s）内。常設インスタンス（baseline は無料枠外）を
+買わずに済むのが最大の利点。
+
+### 運用
+
+- 公開鍵 `DISCORD_PUBLIC_KEY` は Worker の secret と Azure のアプリ設定の両方に置く
+- Discord の Interactions Endpoint URL は Worker の URL（HTTPS）。保存前に Discord
+  が署名付き PING を送るため、Worker のデプロイが先。
+  `PATCH /applications/@me` で API からも設定できる（`.github/workflows/deploy-worker.yml`）。
+- `/setup` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
+- テスト: `node --test cloudflare/*.test.js` と `python -m pytest -q tests/test_interactions.py`

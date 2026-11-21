@@ -6,21 +6,26 @@
 - health: デプロイ確認用
 - setup 系: OAuth 設定フロー（旧 /setup コマンドの代替。
   ブラウザ経由なので Discord の3秒制約を受けない）
+- interactions_deferred: Cloudflare Worker が即 ACK した /setup の後処理。
+  3秒制約は Worker 側で満たしているので、ここはスケールゼロでよい
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from urllib.parse import parse_qs
 
 import azure.functions as func
 
 from cloud import config as cloud_config
+from cloud import interactions as discord_interactions
 from cloud import runner, setup_pages
 from cloud.setup_pages import ERROR_MARKER
 from cloud.storage import TableStore
 
 app = func.FunctionApp()
+log = logging.getLogger(__name__)
 
 
 def _cookies(req: func.HttpRequest) -> dict:
@@ -78,12 +83,51 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
         "client_secret": bool(config.client_secret),
+        "public_key": discord_interactions.is_valid_public_key(
+            getattr(config, "public_key", "")
+        ),
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False),
         status_code=200 if configured else 503,
         mimetype="application/json",
     )
+
+
+@app.function_name(name="interactions_deferred")
+@app.route(
+    route="interactions/deferred", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS
+)
+def interactions_deferred(req: func.HttpRequest) -> func.HttpResponse:
+    """Worker から転送されたインタラクションを処理して Discord へ PATCH する。
+
+    Worker が署名検証済みだが、ここでも再検証する（共有シークレット不要）。
+    3 秒以内に返す必要はないので、コールドスタートしても構わない。
+    """
+    config = cloud_config.CloudConfig.from_env()
+    body = req.get_body()
+    try:
+        token, message = discord_interactions.process_deferred(
+            body=body,
+            headers=dict(req.headers.items()),
+            config=config,
+        )
+    except discord_interactions.SignatureError:
+        return func.HttpResponse("invalid request signature", status_code=401)
+    except RuntimeError as exc:
+        log.error("deferred interaction の設定不足: %s", exc)
+        return func.HttpResponse(str(exc), status_code=503)
+
+    if not discord_interactions.edit_original_response(
+        config.client_id, token, message
+    ):
+        # 設定自体は保存済み。Worker が「失敗」と上書きしないよう区別する
+        return func.HttpResponse(
+            "failed to edit response",
+            status_code=409,
+            headers={"X-Setup-Saved": "true"},
+        )
+    return func.HttpResponse("ok", status_code=200)
 
 
 @app.function_name(name="setup_start")

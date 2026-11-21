@@ -1,0 +1,15 @@
+name = "pso2ngs-interactions"
+main = "interactions.js"
+compatibility_date = "2026-11-21"
+
+[observability]
+enabled = true
+
+# Azure 側の deferred エンドポイント（公開情報なので vars で良い）
+[vars]
+AZURE_DEFERRED_URL = "https://pso2ngs-boost-bot.azurewebsites.net/api/interactions/deferred"
+DISCORD_APPLICATION_ID = "1572407928101806202"
+
+# DISCORD_PUBLIC_KEY は secret として設定する。
+# ローカル: npx wrangler secret put DISCORD_PUBLIC_KEY
+# CI:      cloudflare/wrangler-action の secrets: 入力

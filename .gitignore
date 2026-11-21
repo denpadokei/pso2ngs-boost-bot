@@ -8,3 +8,5 @@ tmp_*.json
 *.log
 *.tmp
 local.settings.json
+node_modules/
+.wrangler/
