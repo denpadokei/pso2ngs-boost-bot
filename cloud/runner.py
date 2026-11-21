@@ -301,11 +301,14 @@ def run_weekly(
     guild_client: DiscordRest | None = None,
     api_factory: Callable[[GuildTarget], ScheduledEventsApi] | None = None,
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
+    guild_ids: list[str] | None = None,
 ) -> RunSummary:
     """Timer から呼ばれる週次バッチの入口。
 
     排他ロックを取得できた実行だけが処理を行い、1サーバーの失敗は
     GuildResult に閉じ込めて他サーバーへ影響させない。
+
+    ``guild_ids`` を渡すと対象サーバーをそのIDに限定する（``/sync`` 用）。
     """
     now = now or now_jst()
     summary = RunSummary()
@@ -338,6 +341,9 @@ def run_weekly(
         targets = filter_available_targets(
             targets, config, store, now, guild_client=guild_client
         )
+        if guild_ids is not None:
+            wanted = set(guild_ids)
+            targets = [target for target in targets if target.guild_id in wanted]
         summary.guilds = len(targets)
         if not targets:
             summary.actions.append("対象サーバーがありません（設定ページで登録してください）")

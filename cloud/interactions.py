@@ -4,7 +4,7 @@ Worker が Discord へ type 5（「考え中…」）を即座に返し、生ボ
 ヘッダーをここへ転送してくる。このモジュールは:
 
 1. 署名を再検証する（共有シークレットを置かずに送信元を保証する）
-2. ``/setup`` の実処理（権限・チャンネル検証と Table 保存）を行う
+2. ``/setup``（通知先設定）と ``/sync``（手動同期）の実処理を行う
 3. ``PATCH /webhooks/{app_id}/{token}/messages/@original`` で
    「考え中…」を結果本文へ差し替える
 
@@ -138,17 +138,81 @@ def _odd_permissions_message(missing: int) -> str:
     return f"\n⚠️ Bot に権限が足りません: {names}（招待し直すと直ります）"
 
 
+def _handle_sync(
+    payload: dict,
+    *,
+    config: CloudConfig,
+    store: TableStore | None = None,
+    sync_run=None,
+) -> str:
+    """``/sync`` を処理して、Discord に表示する本文を返す。"""
+    guild_id = str(payload.get("guild_id") or "")
+    member = payload.get("member") or {}
+    try:
+        member_permissions = int(str(member.get("permissions") or "0"))
+    except ValueError:
+        member_permissions = 0
+    if not guild_id or not (member_permissions & MANAGE_GUILD):
+        return "❌ このコマンドには「サーバーを管理」（MANAGE_GUILD）権限が必要です。"
+
+    store = store or TableStore(config.storage_connection)
+    try:
+        store.ensure_tables()
+        guild = next(
+            (g for g in store.list_guilds() if g.guild_id == guild_id), None
+        )
+    except Exception:
+        log.exception("guilds テーブルの読み出しに失敗")
+        return "⚠️ 設定を確認できませんでした。時間をおいてお試しください。"
+    if guild is None or not guild.enabled:
+        return "⚠️ このサーバーは未設定です。先に /setup で通知先を指定してください。"
+
+    if sync_run is None:
+        from dataclasses import replace
+
+        from .runner import run_weekly
+
+        # Worker の転送タイムアウト（20秒）内に終わるよう取得間隔を詰める
+        fast_config = replace(config, delay=0.0)
+        sync_run = lambda: run_weekly(fast_config, store=store, guild_ids=[guild_id])
+
+    try:
+        summary = sync_run()
+    except Exception:
+        log.exception("手動同期に失敗")
+        return "⚠️ 同期に失敗しました。時間をおいてもう一度お試しください。"
+
+    status = getattr(summary, "status", "ok")
+    if status == "skipped":
+        return "⏭️ 同期をスキップしました（別の実行中、または対象がありません）。"
+    headline = "✅ 同期が完了しました" if status == "ok" else "⚠️ 同期に問題がありました"
+    message = (
+        f"{headline}\n"
+        f"通知 {summary.notified} / 作成 {summary.created} / "
+        f"更新 {summary.updated} / 削除 {summary.deleted}"
+    )
+    if getattr(summary, "failed", 0):
+        message += f" / 失敗 {summary.failed}"
+    for action in list(getattr(summary, "actions", []))[:3]:
+        message += f"\n・{str(action)[:120]}"
+    return message
+
+
 def handle_application_command(
     payload: dict,
     *,
     config: CloudConfig,
     store: TableStore | None = None,
     discord: DiscordRest | None = None,
+    sync_run=None,
 ) -> str:
-    """``/setup`` を処理して、Discord に表示する本文を返す。"""
+    """``/setup`` / ``/sync`` を処理して、Discord に表示する本文を返す。"""
     data = payload.get("data") or {}
-    if data.get("name") != "setup":
-        log.warning("未知のコマンドです: %s", data.get("name"))
+    name = data.get("name")
+    if name == "sync":
+        return _handle_sync(payload, config=config, store=store, sync_run=sync_run)
+    if name != "setup":
+        log.warning("未知のコマンドです: %s", name)
         return "⚠️ 未対応のコマンドです。"
 
     guild_id = str(payload.get("guild_id") or "")
@@ -233,8 +297,9 @@ def process_deferred(
     config: CloudConfig,
     store: TableStore | None = None,
     discord: DiscordRest | None = None,
+    sync_run=None,
 ) -> tuple[str, str]:
-    """署名検証と /setup 処理を行い ``(token, 表示する本文)`` を返す。
+    """署名検証と /setup / /sync 処理を行い ``(token, 表示する本文)`` を返す。
 
     署名不正のみ SignatureError を投げる。それ以外の失敗は本文として
     返すので、呼び出し側は必ず Discord へ PATCH できる。
@@ -267,7 +332,7 @@ def process_deferred(
 
     try:
         message = handle_application_command(
-            payload, config=config, store=store, discord=discord
+            payload, config=config, store=store, discord=discord, sync_run=sync_run
         )
     except Exception:
         log.exception("deferred interaction の処理に失敗")

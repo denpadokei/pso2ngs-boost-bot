@@ -10,7 +10,8 @@ from nacl.signing import SigningKey
 
 from cloud import interactions
 from cloud.config import CloudConfig
-from cloud.storage import TableStore
+from cloud.runner import RunSummary
+from cloud.storage import GuildConfig, TableStore
 from tests.fakes import FakeTableService
 
 MANAGE_GUILD = 1 << 5
@@ -78,7 +79,7 @@ def config(public_key: str) -> CloudConfig:
     )
 
 
-def payload(*, permissions: int = ALL_PERMS, app_permissions: int = ALL_PERMS) -> dict:
+def payload(*, permissions: int = ALL_PERMS, app_permissions: int = ALL_PERMS, name="setup") -> dict:
     return {
         "type": 2,
         "token": "interaction-token",
@@ -86,10 +87,14 @@ def payload(*, permissions: int = ALL_PERMS, app_permissions: int = ALL_PERMS) -
         "member": {"permissions": str(permissions)},
         "app_permissions": str(app_permissions),
         "data": {
-            "name": "setup",
-            "options": [{"name": "channel", "value": "111"}],
+            "name": name,
+            "options": [{"name": "channel", "value": "111"}] if name == "setup" else [],
         },
     }
+
+
+def sync_payload(**kwargs) -> dict:
+    return payload(name="sync", **kwargs)
 
 
 @pytest.fixture
@@ -271,3 +276,97 @@ def test_edit_original_response_reports_http_failure():
     assert not interactions.edit_original_response(
         "app-id", "tok", "x", session=session
     )
+
+
+def test_sync_requires_manage_guild():
+    message = interactions.handle_application_command(
+        sync_payload(permissions=VIEW_CHANNEL | SEND_MESSAGES),
+        config=config("ab" * 32),
+    )
+
+    assert "MANAGE_GUILD" in message
+
+
+def test_sync_requires_setup_first():
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+
+    message = interactions.handle_application_command(
+        sync_payload(), config=config("ab" * 32), store=store
+    )
+
+    assert "未設定" in message
+
+
+def test_sync_runs_and_reports_summary():
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="222", channel_id="111"))
+    calls: list[dict] = []
+
+    def fake_run(**kwargs):
+        calls.append(kwargs)
+        return RunSummary(guilds=1, notified=2, created=1, status="ok")
+
+    message = interactions.handle_application_command(
+        sync_payload(), config=config("ab" * 32), store=store, sync_run=fake_run
+    )
+
+    assert "✅ 同期が完了しました" in message
+    assert "通知 2" in message and "作成 1" in message
+    assert calls and calls[0] == {}
+
+
+def test_sync_degraded_includes_notes():
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="222", channel_id="111"))
+
+    def fake_run(**kwargs):
+        return RunSummary(
+            guilds=1, status="partial", actions=["PSO2の日の情報が既定値です"]
+        )
+
+    message = interactions.handle_application_command(
+        sync_payload(), config=config("ab" * 32), store=store, sync_run=fake_run
+    )
+
+    assert "⚠️ 同期に問題がありました" in message
+    assert "既定値" in message
+
+
+def test_sync_failure_does_not_leak_exception():
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="222", channel_id="111"))
+
+    def boom(**kwargs):
+        raise RuntimeError("secret-token-value")
+
+    message = interactions.handle_application_command(
+        sync_payload(), config=config("ab" * 32), store=store, sync_run=boom
+    )
+
+    assert "同期に失敗" in message
+    assert "secret-token-value" not in message
+
+
+def test_process_deferred_dispatches_sync(secret):
+    body, headers = signed(secret, sync_payload())
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="222", channel_id="111"))
+
+    def fake_run(**kwargs):
+        return RunSummary(guilds=1, notified=1, status="ok")
+
+    token, message = interactions.process_deferred(
+        body=body,
+        headers=headers,
+        config=config(secret.verify_key.encode().hex()),
+        store=store,
+        sync_run=fake_run,
+    )
+
+    assert token == "interaction-token"
+    assert "同期が完了しました" in message

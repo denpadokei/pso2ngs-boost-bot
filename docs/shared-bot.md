@@ -412,12 +412,12 @@ docs/shared-bot.md       # この設計書
 
 ## 17. Cloudflare Workers 即 ACK プロキシ（2026-11 追加）
 
-OAuth 方式で 3 秒制約は消えたが、**`/setup` のスラッシュコマンド UX を 0 円で
+OAuth 方式で 3 秒制約は消えたが、**`/setup` / `/sync` のスラッシュコマンド UX を 0 円で
 取り戻す**ため、Discord と Azure Functions の間に Workers を 1 枚挟む方式を採用した。
 
 ```mermaid
 flowchart LR
-  U[サーバー管理者] -->|/setup #channel| D[Discord]
+  U[サーバー管理者] -->|/setup #channel または /sync| D[Discord]
   D -->|Interactions POST| W[Cloudflare Worker]
   W -->|type 5 を即返す| D
   W -->|ctx.waitUntil: 生ボディ＋署名| F[Azure /api/interactions/deferred]
@@ -430,7 +430,7 @@ flowchart LR
 | 層 | 担当 |
 |---|---|
 | Worker | Ed25519 署名検証、PING 応答、`type: 5`（defer）の即時返却、生ボディ転送、転送失敗時のエラー PATCH |
-| Azure Function | 署名再検証、`/setup` の権限・チャンネル検証、Table 保存、結果本文の PATCH |
+| Azure Function | 署名再検証、`/setup` の権限・チャンネル検証、`/sync` の手動同期、Table 保存、結果本文の PATCH |
 
 Worker には Bot トークンも状態も置かない。状態・権限ロジックは Python 側の
 1 箇所に残すため、OAuth フローと二重実装にならない。
@@ -459,5 +459,7 @@ Azure 側も always-ready を置かずオンデマンドのままなので、従
 - Discord の Interactions Endpoint URL は Worker の URL（HTTPS）。保存前に Discord
   が署名付き PING を送るため、Worker のデプロイが先。
   `PATCH /applications/@me` で API からも設定できる（`.github/workflows/deploy-worker.yml`）。
-- `/setup` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
+- `/setup` と `/sync` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
+- `/sync` は「サーバーを管理」権限限定。呼んだサーバーだけを対象に、取得間隔を 0 にして
+  週次バッチを即時実行する（Worker の転送タイムアウト 20 秒以内に収めるため）
 - テスト: `node --test cloudflare/*.test.js` と `python -m pytest -q tests/test_interactions.py`

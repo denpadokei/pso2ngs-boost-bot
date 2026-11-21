@@ -1,4 +1,4 @@
-"""スラッシュコマンド ``/setup`` を Discord へ登録する。
+"""スラッシュコマンド ``/setup`` / ``/sync`` を Discord へ登録する。
 
 グローバル登録は伝播に最大1時間かかるため、開発中は
 ``DISCORD_DEV_GUILD_ID`` を指定するとギルドコマンドとして即時反映される。
@@ -38,6 +38,16 @@ SETUP_COMMAND = {
     ],
 }
 
+SYNC_COMMAND = {
+    "name": "sync",
+    "description": "このサーバーのキャンペーン通知とDiscordイベントを今すぐ同期します",
+    "default_member_permissions": str(MANAGE_GUILD),
+    "dm_permission": False,
+    "options": [],
+}
+
+ALL_COMMANDS = [SETUP_COMMAND, SYNC_COMMAND]
+
 
 def commands_url(application_id: str, dev_guild_id: str | None = None) -> str:
     if dev_guild_id:
@@ -53,14 +63,14 @@ def register_commands(
     session=None,
     timeout: float = 20.0,
 ) -> list[dict]:
-    """``/setup`` を登録する（PUT で既存コマンドをまとめて上書き）。"""
+    """``/setup`` と ``/sync`` を登録する（PUT で既存コマンドをまとめて上書き）。"""
     session = session or requests.Session()
     session.headers.update(
         {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
     )
     response = session.put(
         commands_url(application_id, dev_guild_id),
-        json=[SETUP_COMMAND],
+        json=ALL_COMMANDS,
         timeout=timeout,
     )
     if response.status_code >= 400:
@@ -72,7 +82,7 @@ def register_commands(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="cloud.commands", description="Discord に /setup を登録する"
+        prog="cloud.commands", description="Discord に /setup と /sync を登録する"
     )
     parser.add_argument("--dev-guild", help="開発中に即時反映させるギルドID")
     args = parser.parse_args(argv)

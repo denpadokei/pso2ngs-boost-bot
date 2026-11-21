@@ -186,7 +186,7 @@ test("forward failure patches an error message to Discord", async () => {
   assert.equal(calls.length, 2);
   assert.ok(calls[1].url.includes("/webhooks/app-id/tok/messages/@original"));
   assert.equal(calls[1].init.method, "PATCH");
-  assert.match(JSON.parse(calls[1].init.body).content, /設定処理に失敗しました/);
+  assert.match(JSON.parse(calls[1].init.body).content, /処理に失敗しました/);
 });
 
 test("PATCH is retried once when Discord rejects it", async () => {

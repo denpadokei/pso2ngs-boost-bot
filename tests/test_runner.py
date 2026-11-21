@@ -63,7 +63,7 @@ def make_run(guild_specs: list[tuple[str, str, bool]], guild_status: dict[str, i
 
     guild_client = FakeDiscordRest(guild_status)
 
-    def run(config=None, fetcher=None):
+    def run(config=None, fetcher=None, **kwargs):
         return run_weekly(
             config or make_config(),
             now=NOW,
@@ -72,6 +72,7 @@ def make_run(guild_specs: list[tuple[str, str, bool]], guild_status: dict[str, i
             guild_client=guild_client,
             api_factory=lambda target: apis[target.guild_id],
             notifier_factory=lambda target: notifiers[target.guild_id],
+            **kwargs,
         )
 
     return store, apis, notifiers, run
@@ -125,6 +126,20 @@ def test_pso2_pages_are_fetched_once_for_two_guilds():
         "https://youtube.com/live/NhXOlE19k8k",
     ):
         assert fetcher.requested.count(url) == 1, url
+
+
+def test_run_weekly_can_limit_to_single_guild():
+    """``/sync`` 用に対象サーバーを限定できる。"""
+    store, apis, notifiers, run = make_run(
+        [("111", "chan-A", False), ("222", "chan-B", False)]
+    )
+
+    summary = run(guild_ids=["111"])
+
+    assert summary.guilds == 1
+    assert notifiers["111"].sent
+    assert notifiers["222"].sent == []
+    assert apis["222"].created == []
 
 
 def test_pso2_day_events_are_included_in_shared_bot():
