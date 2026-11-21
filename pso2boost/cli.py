@@ -117,7 +117,7 @@ def cmd_check(args) -> int:
 
     rss_events = discover_from_rss(fetcher, state, now, calendar=calendar)
     pso2day = discover_pso2_day(fetcher, now)
-    if not schedule_ok and not rss_events and not pso2day.fetched:
+    if not schedule_ok and not rss_events and not pso2day.ok:
         return 2
 
     events = filter_relevant(

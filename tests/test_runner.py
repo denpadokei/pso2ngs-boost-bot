@@ -33,6 +33,7 @@ def make_fetcher() -> FakeFetcher:
             RSS_URL: load("pso2news.xml"),
             ARTICLE_URL: load("article_32486.html"),
             PSO2_DAY_URL: load("article_31542.html"),
+            "https://youtube.com/live/NhXOlE19k8k": load("youtube_headline.html"),
         }
     )
 
@@ -116,12 +117,18 @@ def test_pso2_pages_are_fetched_once_for_two_guilds():
     run(fetcher=fetcher)
 
     # どの URL も1回しか取得していない（Fetcher のキャッシュ経由）
-    for url in (SCHEDULE_URL, RSS_URL, ARTICLE_URL, PSO2_DAY_URL):
+    for url in (
+        SCHEDULE_URL,
+        RSS_URL,
+        ARTICLE_URL,
+        PSO2_DAY_URL,
+        "https://youtube.com/live/NhXOlE19k8k",
+    ):
         assert fetcher.requested.count(url) == 1, url
 
 
 def test_pso2_day_events_are_included_in_shared_bot():
-    """共有Botでも PSO2の日のレア泥期間がイベント化・通知される。"""
+    """共有Botでも PSO2の日のレア泥期間とNGSヘッドラインが通知される。"""
     store, apis, notifiers, run = make_run([("111", "chan-A", False)])
 
     summary = run()
@@ -134,6 +141,14 @@ def test_pso2_day_events_are_included_in_shared_bot():
     assert any("レアドロップ倍率+100%" in payload["description"] for payload in pso2day)
     assert all(PSO2_DAY_URL in payload["description"] for payload in pso2day)
     assert any(kind == "new" for kind, _, _ in notifiers["111"].sent)
+
+    # NGSヘッドラインは開始（21:00）から1時間（22:00）のイベントになる
+    headline = [
+        payload for payload in apis["111"].created if "NGS ヘッドライン" in payload["name"]
+    ]
+    assert len(headline) == 1
+    assert headline[0]["start"].hour == 21
+    assert headline[0]["end"].hour == 22
 
 
 def test_guild_failure_does_not_block_others():

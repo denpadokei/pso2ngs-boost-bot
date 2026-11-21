@@ -5,6 +5,7 @@ from pso2boost.fetch import FetchError
 from pso2boost.pso2day import (
     PSO2_DAY_URL,
     Template,
+    Window,
     discover_pso2_day,
     events_from_template,
     parse_page,
@@ -92,6 +93,8 @@ def test_fetch_failure_uses_defaults():
 
     assert fetcher.urls == [PSO2_DAY_URL]
     assert result.fetched is False
+    assert result.parsed is False
+    assert result.ok is False
     assert len(events) == 4
     assert events[0].period.start.at == datetime(2026, 11, 1, 0, 0, tzinfo=JST)
     assert "レアドロップ倍率+100%" in events[0].buffs_all
@@ -106,6 +109,8 @@ def test_discover_fetches_announcement_page():
 
     assert fetcher.urls == [PSO2_DAY_URL]
     assert result.fetched is True
+    assert result.parsed is True
+    assert result.ok is True
     assert len(events) == 4
     assert (events[1].period.start.at, events[1].period.end.at) == (
         datetime(2026, 11, 21, 0, 0, tzinfo=JST),
@@ -123,3 +128,29 @@ def test_future_occurrence_is_syncable_to_discord():
     payload, _ = built
     assert payload["name"] == "PSO2の日（21～23日）"
     assert "レアドロップ倍率+100%" in payload["description"]
+
+
+def test_structure_change_is_reported_as_unparsed():
+    html = '<div class="template01Block" id="cp01"><h2>PSO2の日</h2></div>'
+
+    template = parse_page(html)
+
+    assert template.parsed is False
+    assert template.windows == Template.defaults().windows
+
+
+def test_short_month_is_clamped():
+    now = datetime(2026, 2, 1, tzinfo=JST)
+    template = Template(windows=(Window(29, 31),))
+
+    events = events_from_template(template, now, months=1)
+
+    assert len(events) == 1
+    assert events[0].period.start.at == datetime(2026, 2, 28, 0, 0, tzinfo=JST)
+    assert events[0].period.end.at == datetime(2026, 2, 28, 23, 59, tzinfo=JST)
+
+
+def test_reversed_window_is_skipped():
+    template = Template(windows=(Window(23, 3),))  # 反転した期間
+
+    assert events_from_template(template, datetime(2026, 11, 1, tzinfo=JST), months=1) == []

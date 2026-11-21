@@ -127,7 +127,7 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=17
 ### 週次 Timer
 
 1. `guilds` から `enabled=true` を全件取得
-2. PSO2 データを**1回だけ**取得（カレンダー → スケジュール → RSS → 記事 → PSO2の日）
+2. PSO2 データを**1回だけ**取得（カレンダー → スケジュール → RSS → 記事 → PSO2の日 → 番組配信ページ）
 3. イベント一覧を構築（既存 `pso2boost` のパーサを再利用）
 4. サーバーごとに並列（同時 4〜8）で処理
    - `state` を読む

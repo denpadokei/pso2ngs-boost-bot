@@ -69,7 +69,11 @@ class Fetcher:
                 if response.status_code >= 400:
                     # 4xx はリトライしても無駄なので即座に諦める
                     raise FetchError(f"HTTP {response.status_code}: {url}")
-                response.encoding = response.encoding or "utf-8"
+                # Content-Type に charset が無い場合、requests は ISO-8859-1 と
+                # みなして日本語を文字化けさせる。pso2.jp（と配信ページ）は UTF-8。
+                content_type = getattr(response, "headers", {}).get("Content-Type", "")
+                if "charset=" not in content_type.lower():
+                    response.encoding = "utf-8"
                 text = response.text
                 self._cache[url] = text
                 time.sleep(self.delay)

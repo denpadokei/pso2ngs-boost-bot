@@ -117,17 +117,20 @@ def discover_events(
     now: datetime,
     schedule_events: list[BoostEvent],
     calendar: MaintenanceCalendar,
-) -> list[BoostEvent]:
+) -> tuple[list[BoostEvent], bool]:
     """RSS から新着記事を拾い、スケジュールと合わせたイベント一覧を作る。
 
     RSS の既読は全サーバー共有（_shared パーティション）なので、
     pso2.jp への取得はサーバー数によらず1回で済む。
+
+    戻り値の bool は PSO2の日が実データ（既定値ではない）を読めたかどうか。
     """
     rss_events = discover_from_rss(fetcher, shared_state, now, calendar=calendar)
     pso2day = discover_pso2_day(fetcher, now)
-    return filter_relevant(
+    events = filter_relevant(
         merge_events(merge_events(schedule_events, rss_events), pso2day.events), now
     )
+    return events, pso2day.ok
 
 
 def prepare_guild(
@@ -306,6 +309,7 @@ def run_weekly(
     """
     now = now or now_jst()
     summary = RunSummary()
+    degraded = False  # 情報源が既定値に退化した（同期自体は続行）
 
     if not config.bot_token:
         summary.actions.append("DISCORD_BOT_TOKEN が未設定のため何もしません")
@@ -346,9 +350,14 @@ def run_weekly(
             calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
             # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
             shared_state = store.load_state(SHARED_PARTITION, now)
-            events = discover_events(
+            events, pso2day_ok = discover_events(
                 fetcher, shared_state, now, schedule_events, calendar
             )
+            if not pso2day_ok:
+                message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
+                summary.actions.append(message)
+                log.warning(message)
+                degraded = True
             store.save_state(SHARED_PARTITION, shared_state)
         except FetchError as exc:
             message = f"PSO2 データの取得に失敗: {exc}"
@@ -439,7 +448,7 @@ def run_weekly(
         summary.updated = sum(result.updated for result in all_results)
         summary.deleted = sum(result.deleted for result in all_results)
         summary.details = all_results
-        summary.status = "partial" if summary.failed else "ok"
+        summary.status = "partial" if (summary.failed or degraded) else "ok"
         log.info("週次同期完了: %s", summary.summary)
         return summary
     finally:

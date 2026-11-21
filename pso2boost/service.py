@@ -91,6 +91,8 @@ def enrich_event(
     """
     if not event.url:
         return event
+    if event.source == "pso2day" and event.has_detail:
+        return event  # 専用パーサーで倍率を取得済み。汎用パーサーで上書きしない
     base = event.url.split("#")[0]
     if urlparse(base).netloc and urlparse(base).netloc != urlparse(SITE).netloc:
         return event  # 外部サイト（bit.ly など）は本文を持っていない

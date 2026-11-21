@@ -54,10 +54,16 @@ class Window:
 
 @dataclass
 class Discovery:
-    """検出結果と、告知ページが実際に取得できたかどうか。"""
+    """検出結果と、告知ページから実データを読めたかどうか。"""
 
     events: list[BoostEvent]
-    fetched: bool = True
+    fetched: bool = True  # HTTP 取得に成功したか
+    parsed: bool = True  # 開催日・倍率を実際に読み取れたか
+
+    @property
+    def ok(self) -> bool:
+        """取得も解析も成功した場合だけ True（既定値フォールバックは False）。"""
+        return self.fetched and self.parsed
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,7 @@ class Template:
     windows: tuple[Window, ...]
     buffs_all: tuple[str, ...] = DEFAULT_BUFFS_ALL
     buffs_premium: tuple[str, ...] = DEFAULT_BUFFS_PREMIUM
+    parsed: bool = True
 
     @classmethod
     def defaults(cls) -> "Template":
@@ -74,7 +81,8 @@ class Template:
             windows=(
                 Window(1, 3),
                 Window(21, 23),
-            )
+            ),
+            parsed=False,
         )
 
 
@@ -149,19 +157,37 @@ def _buffs(block) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def parse_page(html: str) -> Template:
-    """告知 HTML から毎月の開催情報を取り出す。取れない項目は既定値を使う。"""
+    """告知 HTML から毎月の開催情報を取り出す。取れない項目は既定値を使う。
+
+    既定値に倒れた項目はログに残し、``parsed=False`` を返す。呼び出し側は
+    これを監視（既定値で通知し続けている状態）の検知に使う。
+    """
     soup = BeautifulSoup(html, "html.parser")
     block = _pso2day_block(soup)
     if block is None:
         log.warning("PSO2の日のブロックが見つからないため既定値を使います")
         return Template.defaults()
 
-    template = Template(
-        windows=_windows(block) or Template.defaults().windows,
-        buffs_all=_buffs(block)[0] or DEFAULT_BUFFS_ALL,
-        buffs_premium=_buffs(block)[1] or DEFAULT_BUFFS_PREMIUM,
+    defaults = Template.defaults()
+    windows = _windows(block)
+    buffs_all, buffs_premium = _buffs(block)
+    parsed = True
+    if not windows:
+        log.warning("PSO2の日の開催日を読み取れず既定値を使います（ページ構造の変更を確認）")
+        windows, parsed = defaults.windows, False
+    if not buffs_all:
+        log.warning("PSO2の日のブースト内容（全プレイヤー）を読み取れず既定値を使います")
+        buffs_all, parsed = DEFAULT_BUFFS_ALL, False
+    if not buffs_premium:
+        log.warning("PSO2の日のブースト内容（プレミアム）を読み取れず既定値を使います")
+        buffs_premium, parsed = DEFAULT_BUFFS_PREMIUM, False
+
+    return Template(
+        windows=windows,
+        buffs_all=buffs_all,
+        buffs_premium=buffs_premium,
+        parsed=parsed,
     )
-    return template
 
 
 def _months(now: datetime, count: int):
@@ -190,6 +216,9 @@ def events_from_template(
             end_day = min(window.end_day, last_day)
             start = datetime(year, month, start_day, *window.start_time, tzinfo=JST)
             end = datetime(year, month, end_day, *window.end_time, tzinfo=JST)
+            if end <= start:
+                log.warning("PSO2の日の期間が反転しているためスキップ: %s %s", year, window)
+                continue
             label = f"PSO2の日（{start_day}～{end_day}日）"
             raw = (
                 f"毎月{start_day}日 {window.start_time[0]}:{window.start_time[1]:02d}"
@@ -223,8 +252,11 @@ def discover_pso2_day(
     now: datetime,
     months: int = DEFAULT_MONTHS,
     url: str = PSO2_DAY_URL,
-) -> list[BoostEvent]:
-    """告知ページを取得して PSO2の日のイベントを返す。取得失敗時は既定値で生成する。"""
+) -> Discovery:
+    """告知ページを取得して PSO2の日のイベントを返す。取得失敗時は既定値で生成する。
+
+    ``ok`` が False のときは既定値で生成した状態を表し、監視側へ伝える。
+    """
     try:
         html = fetcher.get(url, cache=True)
     except FetchError as exc:
@@ -232,6 +264,7 @@ def discover_pso2_day(
         return Discovery(
             events_from_template(Template.defaults(), now, months, url),
             fetched=False,
+            parsed=False,
         )
 
     template = parse_page(html)
@@ -241,4 +274,4 @@ def discover_pso2_day(
         len(events),
         ", ".join(event.label for event in events),
     )
-    return Discovery(events)
+    return Discovery(events, parsed=template.parsed)
