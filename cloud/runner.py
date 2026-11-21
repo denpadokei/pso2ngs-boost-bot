@@ -42,6 +42,9 @@ from .storage import GuildConfig, LAST_ERROR_MAX, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)
 
+# /sync は週次実行のスナップショットだけを使う。更新は週次が担うため古さは問わない。
+OFFLINE_SNAPSHOT_MAX_AGE = 30 * 24 * 3600
+
 
 @dataclass
 class GuildTarget:
@@ -304,6 +307,7 @@ def run_weekly(
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
     guild_ids: list[str] | None = None,
     snapshot_ttl: int = 600,
+    offline: bool = False,
 ) -> RunSummary:
     """Timer から呼ばれる週次バッチの入口。
 
@@ -313,7 +317,10 @@ def run_weekly(
     ``guild_ids`` を渡すと対象サーバーをそのIDに限定する（``/sync`` 用）。
 
     ``snapshot_ttl`` 秒以内に取得したイベント一覧があれば再利用する。
-    ``/sync`` が各サーバーから呼ばれても pso2.jp への取得を1回に抑えるため。
+
+    ``offline=True`` のときは pso2.jp へ**一切アクセスしない**。週次実行が保存した
+    スナップショットを（古さに関わらず）適用するだけ。スナップショットが無ければ
+    スキップする。``/sync`` はこのモードで呼ぶ。
     """
     now = now or now_jst()
     summary = RunSummary()
@@ -356,29 +363,45 @@ def run_weekly(
             log.warning("対象サーバーがありません")
             return summary
 
-        fetcher = fetcher or Fetcher(delay=config.delay)
         fresh = False
         try:
-            snapshot = store.load_event_snapshot(now, snapshot_ttl)
-            if snapshot is not None:
-                # 直近の取得結果を再利用（各サーバーからの /sync で再取得しない）
+            if offline:
+                # /sync はサイトへアクセスせず、週次実行の保存データだけを使う。
+                # 古さは問わない（更新は週次実行が担う）。
+                snapshot = store.load_event_snapshot(now, OFFLINE_SNAPSHOT_MAX_AGE)
+                if snapshot is None:
+                    message = "同期できるデータがありません。週次実行後に再度お試しください"
+                    summary.actions.append(message)
+                    summary.status = "skipped"
+                    log.warning(message)
+                    return summary
                 events = decode_events(snapshot)
                 calendar = MaintenanceCalendar()
-                log.info("共有スナップショットを再利用: %d 件", len(events))
+                log.info("保存済みスナップショットを適用: %d 件", len(events))
             else:
-                calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
-                # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
-                shared_state = store.load_state(SHARED_PARTITION, now)
-                events, pso2day_ok = discover_events(
-                    fetcher, shared_state, now, schedule_events, calendar
-                )
-                if not pso2day_ok:
-                    message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
-                    summary.actions.append(message)
-                    log.warning(message)
-                    degraded = True
-                store.save_state(SHARED_PARTITION, shared_state)
-                fresh = True
+                snapshot = store.load_event_snapshot(now, snapshot_ttl)
+                if snapshot is not None:
+                    # 直近の取得結果を再利用
+                    events = decode_events(snapshot)
+                    calendar = MaintenanceCalendar()
+                    log.info("共有スナップショットを再利用: %d 件", len(events))
+                else:
+                    fetcher = fetcher or Fetcher(delay=config.delay)
+                    calendar, schedule_events = fetch_schedule(
+                        fetcher, now, config.keywords
+                    )
+                    # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
+                    shared_state = store.load_state(SHARED_PARTITION, now)
+                    events, pso2day_ok = discover_events(
+                        fetcher, shared_state, now, schedule_events, calendar
+                    )
+                    if not pso2day_ok:
+                        message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
+                        summary.actions.append(message)
+                        log.warning(message)
+                        degraded = True
+                    store.save_state(SHARED_PARTITION, shared_state)
+                    fresh = True
         except FetchError as exc:
             message = f"PSO2 データの取得に失敗: {exc}"
             summary.actions.append(message)

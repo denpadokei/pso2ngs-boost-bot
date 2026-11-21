@@ -351,6 +351,31 @@ def test_sync_failure_does_not_leak_exception():
     assert "secret-token-value" not in message
 
 
+def test_sync_default_runner_is_offline(monkeypatch, secret):
+    """実際の /sync ハンドラは offline=True で run_weekly を呼ぶ。"""
+    captured: dict = {}
+
+    def fake_run(config, **kwargs):
+        captured.update(kwargs)
+        return RunSummary(status="ok", guilds=1)
+
+    monkeypatch.setattr("cloud.runner.run_weekly", fake_run)
+    body, headers = signed(secret, sync_payload())
+    store = TableStore("", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="222", channel_id="111"))
+
+    interactions.process_deferred(
+        body=body,
+        headers=headers,
+        config=config(secret.verify_key.encode().hex()),
+        store=store,
+    )
+
+    assert captured.get("offline") is True
+    assert captured.get("guild_ids") == ["222"]
+
+
 def test_process_deferred_dispatches_sync(secret):
     body, headers = signed(secret, sync_payload())
     store = TableStore("", service=FakeTableService())

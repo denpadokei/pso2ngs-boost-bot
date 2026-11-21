@@ -159,6 +159,43 @@ def test_snapshot_reuses_events_without_fetching_again():
     assert second.notified == 0  # 二重通知しない
 
 
+def test_offline_sync_never_fetches_site():
+    """offline=True ではサイトへアクセスせず、保存済みデータだけを使う。"""
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: FakeApi("111"),
+        notifier_factory=lambda target: FakeNotifier("chan-A"),
+    )
+
+    # スナップショットが無い場合は取得せずスキップ
+    summary = run_weekly(**kwargs, offline=True)
+    assert summary.status == "skipped"
+    assert fetcher.requested == []
+    assert any("週次実行" in action for action in summary.actions)
+
+    # 週次実行が保存したスナップショットは古くても使う
+    run_weekly(**kwargs)
+    snapshot = store.load_event_snapshot(NOW, 600)
+    assert snapshot is not None
+    fetcher.requested.clear()
+
+    later = datetime(2026, 12, 1, 12, 0, tzinfo=JST)
+    summary = run_weekly(**dict(kwargs, now=later), offline=True)
+
+    assert summary.status == "ok"
+    assert fetcher.requested == []
+
+
 def test_snapshot_ttl_zero_forces_refetch():
     from cloud.runner import run_weekly
 

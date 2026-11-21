@@ -174,7 +174,10 @@ def _handle_sync(
 
         # Worker の転送タイムアウト（20秒）内に終わるよう取得間隔を詰める
         fast_config = replace(config, delay=0.0)
-        sync_run = lambda: run_weekly(fast_config, store=store, guild_ids=[guild_id])
+        # /sync はサイトへアクセスせず、週次実行が保存したスナップショットだけを使う
+        sync_run = lambda: run_weekly(
+            fast_config, store=store, guild_ids=[guild_id], offline=True
+        )
 
     try:
         summary = sync_run()
@@ -183,8 +186,10 @@ def _handle_sync(
         return "⚠️ 同期に失敗しました。時間をおいてもう一度お試しください。"
 
     status = getattr(summary, "status", "ok")
+    notes = [str(action)[:120] for action in list(getattr(summary, "actions", []))[:3]]
     if status == "skipped":
-        return "⏭️ 同期をスキップしました（別の実行中、または対象がありません）。"
+        reason = f"\n・{notes[0]}" if notes else ""
+        return f"⏭️ 同期をスキップしました{reason}"
     headline = "✅ 同期が完了しました" if status == "ok" else "⚠️ 同期に問題がありました"
     message = (
         f"{headline}\n"
@@ -193,8 +198,8 @@ def _handle_sync(
     )
     if getattr(summary, "failed", 0):
         message += f" / 失敗 {summary.failed}"
-    for action in list(getattr(summary, "actions", []))[:3]:
-        message += f"\n・{str(action)[:120]}"
+    for note in notes:
+        message += f"\n・{note}"
     return message
 
 
