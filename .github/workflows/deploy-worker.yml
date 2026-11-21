@@ -41,6 +41,10 @@ jobs:
       # ここから先は「デプロイ後の Discord 側設定」の自動化。
       # Interaction Endpoint URL は保存前に Discord が署名付き PING を
       # 送って検証するため、Worker のデプロイ完了後に実行する。
+      - name: Warn when Discord post-deploy config is skipped
+        if: vars.AZURE_FUNCTIONAPP_NAME == ''
+        run: echo "::warning::AZURE_FUNCTIONAPP_NAME が未設定のため Discord 側設定（endpoint / コマンド登録）をスキップします"
+
       - name: Azure login
         if: vars.AZURE_FUNCTIONAPP_NAME != ''
         uses: azure/login@v3
@@ -58,43 +62,41 @@ jobs:
           url="${ENDPOINT_URL%/}"
           app="${{ vars.AZURE_FUNCTIONAPP_NAME }}"
           rg="${{ vars.AZURE_RESOURCE_GROUP }}"
+          # 必要な2値だけを取得する（接続文字列などをシェル変数へ積まない）
           if [ -n "$rg" ]; then
-            settings=$(az functionapp config appsettings list --name "$app" --resource-group "$rg" -o json)
+            token=$(az functionapp config appsettings list --name "$app" --resource-group "$rg" --query "[?name=='DISCORD_BOT_TOKEN'].value" -o tsv)
+            app_id=$(az functionapp config appsettings list --name "$app" --resource-group "$rg" --query "[?name=='DISCORD_APPLICATION_ID'].value" -o tsv)
           else
-            settings=$(az functionapp config appsettings list --name "$app" -o json)
+            token=$(az functionapp config appsettings list --name "$app" --query "[?name=='DISCORD_BOT_TOKEN'].value" -o tsv)
+            app_id=$(az functionapp config appsettings list --name "$app" --query "[?name=='DISCORD_APPLICATION_ID'].value" -o tsv)
           fi
-          token=$(echo "$settings" | jq -r '.[] | select(.name=="DISCORD_BOT_TOKEN") | .value')
-          app_id=$(echo "$settings" | jq -r '.[] | select(.name=="DISCORD_APPLICATION_ID") | .value')
           if [ -z "$token" ] || [ -z "$app_id" ]; then
-            echo "Azure に Bot 設定が無いため Discord 側の設定をスキップします" >&2
-            exit 0
+            echo "::error::Azure に DISCORD_BOT_TOKEN / DISCORD_APPLICATION_ID がありません"
+            exit 1
           fi
           echo "::add-mask::$token"
+          case "$url" in
+            https://*) ;;
+            *) echo "::error::wrangler-action から Worker URL が取得できませんでした" ; exit 1 ;;
+          esac
 
-          # Worker が先にデプロイ済みなので、署名付き PING の検証に通る
-          curl -sS -X PATCH "https://discord.com/api/v10/applications/@me" \
+          # Worker が先にデプロイ済みなので、署名付き PING の検証に通る。
+          # -f がないと curl は HTTP 4xx/5xx でも終了コード 0 を返すため必須。
+          response=$(curl -fsS -X PATCH "https://discord.com/api/v10/applications/@me" \
             -H "Authorization: Bot $token" \
             -H "Content-Type: application/json" \
-            -d "{\"interactions_endpoint_url\":\"$url\"}"
+            -d "{\"interactions_endpoint_url\":\"$url\"}") || {
+              echo "::error::Discord の Interactions Endpoint URL 設定に失敗しました"
+              exit 1
+            }
+          echo "$response" | jq -e --arg url "$url" '.interactions_endpoint_url == $url' >/dev/null || {
+            echo "::error::Discord 側の endpoint 設定が反映されていません"
+            exit 1
+          }
 
-          # cloud/commands.py の SETUP_COMMAND と同じ定義
-          curl -sS -X PUT "https://discord.com/api/v10/applications/$app_id/commands" \
-            -H "Authorization: Bot $token" \
-            -H "Content-Type: application/json" \
-            -d '[
-              {
-                "name": "setup",
-                "description": "ブーストキャンペーンの通知先チャンネルを設定します",
-                "default_member_permissions": "32",
-                "dm_permission": false,
-                "options": [
-                  {
-                    "name": "channel",
-                    "description": "通知を投稿するチャンネル",
-                    "type": 7,
-                    "required": true,
-                    "channel_types": [0, 5]
-                  }
-                ]
-              }
-            ]'
+          # コマンド定義は cloud/commands.py の 1 箇所に集約する
+          python -m pip install --quiet requests
+          DISCORD_BOT_TOKEN="$token" DISCORD_APPLICATION_ID="$app_id" python -m cloud.commands || {
+            echo "::error::/setup コマンドの登録に失敗しました"
+            exit 1
+          }

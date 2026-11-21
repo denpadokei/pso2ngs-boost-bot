@@ -52,7 +52,9 @@ export async function verifySignature(publicKeyHex, timestamp, rawBody, signatur
       hexToBytes(signatureHex),
       data,
     );
-  } catch {
+  } catch (error) {
+    // 署名不正と公開鍵の設定ミスを区別できるよう、こちらは記録する
+    console.error("signature verification error (public key misconfigured?)", error);
     return false;
   }
 }
@@ -64,22 +66,58 @@ function json(body, status = 200) {
   });
 }
 
+function logFailure(token, message, detail) {
+  // トークンは相関 ID。秘密ではないが、全文を外部ログへ流さないよう末尾だけ使う。
+  console.error(`[setup][${token.slice(-8) || "-"}] ${message}`, detail ?? "");
+}
+
 /** deferred メッセージ（考え中…）を結果本文へ差し替える。 */
 export async function patchOriginal(env, token, content) {
-  if (!token || !env.DISCORD_APPLICATION_ID) return false;
-  const response = await fetch(
-    `https://discord.com/api/v10/webhooks/${env.DISCORD_APPLICATION_ID}/${token}/messages/@original`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: content.slice(0, 2000) }),
-    },
-  );
-  return response.ok;
+  if (!token || !env.DISCORD_APPLICATION_ID) {
+    logFailure(token, "PATCH に必要な設定がありません", {
+      token: Boolean(token),
+      applicationId: Boolean(env.DISCORD_APPLICATION_ID),
+    });
+    return false;
+  }
+  try {
+    const response = await fetch(
+      `https://discord.com/api/v10/webhooks/${env.DISCORD_APPLICATION_ID}/${token}/messages/@original`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: content.slice(0, 2000) }),
+      },
+    );
+    if (!response.ok) {
+      logFailure(token, "Discord への PATCH が失敗", response.status);
+    }
+    return response.ok;
+  } catch (error) {
+    logFailure(token, "Discord への PATCH が例外", error);
+    return false;
+  }
+}
+
+/** PATCH 自体が失敗しても「考え中…」で放置しないよう、もう一度だけ試す。 */
+async function patchWithRetry(env, token, content) {
+  if (await patchOriginal(env, token, content)) return true;
+  if (await patchOriginal(env, token, content)) return true;
+  logFailure(token, "PATCH を2回とも失敗しました（ユーザーは考え中…のまま）");
+  return false;
+}
+
+function errorMessage(status) {
+  // 401/404/503 は再試行で直らないオペレーター要対応の設定不備
+  if ([401, 403, 404, 503].includes(status)) {
+    return "⚠️ 設定処理に失敗しました（サーバー側の設定が未完了です）。管理者に連絡してください。";
+  }
+  return "⚠️ 設定処理に失敗しました。しばらくしてからもう一度お試しください。";
 }
 
 async function forward(env, rawBody, signature, timestamp, token) {
   try {
+    // waitUntil の 30 秒制限より前に打ち切り、フォールバック PATCH を必ず試す
     const response = await fetch(env.AZURE_DEFERRED_URL, {
       method: "POST",
       headers: {
@@ -88,22 +126,15 @@ async function forward(env, rawBody, signature, timestamp, token) {
         "X-Signature-Timestamp": timestamp,
       },
       body: rawBody,
+      signal: AbortSignal.timeout(20000),
     });
     if (!response.ok) {
-      console.error("Azure deferred returned", response.status);
-      await patchOriginal(
-        env,
-        token,
-        `⚠️ 設定処理に失敗しました (HTTP ${response.status})。しばらくしてからもう一度お試しください。`,
-      );
+      logFailure(token, "Azure deferred returned", response.status);
+      await patchWithRetry(env, token, errorMessage(response.status));
     }
   } catch (error) {
-    console.error("Azure deferred failed", error);
-    await patchOriginal(
-      env,
-      token,
-      "⚠️ 設定処理に失敗しました。しばらくしてからもう一度お試しください。",
-    );
+    logFailure(token, "Azure deferred failed", error);
+    await patchWithRetry(env, token, errorMessage(0));
   }
 }
 
@@ -127,6 +158,15 @@ export default {
       return json({ error: "invalid request signature" }, 401);
     }
 
+    // 署名は有効でも、古いインタラクションのリプレイは拒否する
+    const issuedAt = Number(timestamp);
+    if (
+      !Number.isFinite(issuedAt) ||
+      Math.abs(Date.now() / 1000 - issuedAt) > 300
+    ) {
+      return json({ error: "stale request signature" }, 401);
+    }
+
     let payload;
     try {
       payload = JSON.parse(TEXT_DECODER.decode(rawBody));
@@ -147,9 +187,7 @@ export default {
       return json({ type: 5, data: { flags: 64 } });
     }
 
-    ctx.waitUntil(
-      patchOriginal(env, String(payload.token || ""), "⚠️ 未対応のインタラクションです。"),
-    );
-    return json({ type: 5, data: { flags: 64 } });
+    // AUTOCOMPLETE など type 5 を許さない種別は defer しない
+    return json({ error: "unsupported interaction type" }, 400);
   },
 };

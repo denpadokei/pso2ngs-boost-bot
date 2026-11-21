@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Mapping
 
 import requests
@@ -24,6 +25,7 @@ from pso2boost.tz import now_jst
 
 from .config import CloudConfig
 from .discord import DiscordRest, DiscordRestError, can_send_messages
+from .permissions import effective_channel_permissions
 from .storage import GuildConfig, TableStore
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,16 @@ MANAGE_GUILD = 1 << 5
 
 class SignatureError(ValueError):
     """署名が不正（転送元を信頼できない）。"""
+
+
+def is_valid_public_key(public_key_hex: str) -> bool:
+    """公開鍵が 32 バイトの hex か（health での設定確認用）。"""
+    if not public_key_hex:
+        return False
+    try:
+        return len(bytes.fromhex(public_key_hex)) == 32
+    except (ValueError, TypeError):
+        return False
 
 
 def verify_signature(
@@ -88,8 +100,9 @@ def edit_original_response(
         response = session.patch(
             url, json={"content": content[:2000]}, timeout=timeout
         )
-    except requests.RequestException as exc:
-        log.exception("interaction の差し替えに失敗: %s", exc)
+    except requests.RequestException:
+        # 例外文にはトークン付き URL が含まれるため、詳細はログに出さない
+        log.error("interaction の差し替えに失敗しました")
         return False
     if response.status_code >= 400:
         log.error("interaction の差し替えに失敗: HTTP %s", response.status_code)
@@ -147,20 +160,24 @@ def handle_application_command(
     try:
         channel = discord.get_channel(channel_value)
     except DiscordRestError as exc:
-        return f"⚠️ チャンネルを確認できませんでした: {exc}"
+        # 例外本文には API のレスポンスが含まれることがあるため送らない
+        detail = f" (HTTP {exc.status_code})" if exc.status_code else ""
+        return f"⚠️ チャンネルを確認できませんでした{detail}。"
 
     if str(channel.get("guild_id") or "") != guild_id:
         return "⚠️ このサーバー内のチャンネルを指定してください。"
     if channel.get("type") not in TEXT_CHANNEL_TYPES:
         return "⚠️ 通知先にはテキストチャンネル（またはアナウンスチャンネル）を指定してください。"
 
-    # インタラクションの app_permissions は Bot の実効権限。OAuth 設定画面と
-    # 同じ can_send_messages で判定し、投稿権限なしの 403 を事前に警告する。
-    try:
-        app_permissions = int(str(payload.get("app_permissions") or "0"))
-    except ValueError:
-        app_permissions = 0
-    permissions_ok = can_send_messages(app_permissions)
+    # app_permissions は「コマンドを呼んだ場所」の権限であって通知先ではない。
+    # OAuth フローと同じヘルパーで、選択されたチャンネルの実効権限を求める。
+    effective = effective_channel_permissions(discord, guild_id, channel)
+    if effective is None:
+        # 判定不能なら誤警告しない（週次実行時に last_error で気づく）
+        log.warning("選択チャンネルの権限を判定できないため警告を省略: %s", guild_id)
+        permissions_ok = True
+    else:
+        permissions_ok = can_send_messages(effective)
 
     store = store or TableStore(config.storage_connection)
     now = now_jst()
@@ -180,19 +197,19 @@ def handle_application_command(
             last_error="",
         )
         store.upsert_guild(guild)
-    except Exception as exc:
+    except Exception:
+        # ユーザー向けには機微情報を出さないが、トレースバックは server 側へ残す
         log.exception("guilds テーブルの更新に失敗")
-        return f"⚠️ 設定を保存できませんでした: {exc}"
+        return "⚠️ 設定を保存できませんでした。時間をおいてもう一度お試しください。"
 
     log.info("サーバー %s の通知先を設定: チャンネル %s", guild_id, guild.channel_id)
     message = (
         f"✅ 通知先を #{channel.get('name') or guild.channel_id} に設定しました\n"
         "次回実行: 毎週水曜 13:00 (JST)"
     )
-    if not permissions_ok:
-        message += _odd_permissions_message(
-            (1 << 10 | 1 << 11) & ~app_permissions
-        )
+    missing = ((1 << 10) | (1 << 11)) & ~effective if effective is not None else 0
+    if not permissions_ok and missing:
+        message += _odd_permissions_message(missing)
     return message
 
 
@@ -217,6 +234,14 @@ def process_deferred(
     if not verify_signature(config.public_key, timestamp or "", body, signature or ""):
         raise SignatureError("invalid request signature")
 
+    # Worker を経由しない直接呼び出しもあるので、Azure 側でも鮮度を確認する
+    try:
+        issued_at = int(timestamp or "0")
+    except (TypeError, ValueError):
+        issued_at = 0
+    if abs(time.time() - issued_at) > 300:
+        raise SignatureError("stale request signature")
+
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
@@ -230,7 +255,7 @@ def process_deferred(
         message = handle_application_command(
             payload, config=config, store=store, discord=discord
         )
-    except Exception as exc:
+    except Exception:
         log.exception("deferred interaction の処理に失敗")
-        message = f"⚠️ 設定処理に失敗しました: {exc}"
+        message = "⚠️ 設定処理に失敗しました。時間をおいてもう一度お試しください。"
     return token, message

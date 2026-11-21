@@ -2,6 +2,9 @@ name = "pso2ngs-interactions"
 main = "interactions.js"
 compatibility_date = "2026-11-21"
 
+[observability]
+enabled = true
+
 # Azure 側の deferred エンドポイント（公開情報なので vars で良い）
 [vars]
 AZURE_DEFERRED_URL = "https://pso2ngs-boost-bot.azurewebsites.net/api/interactions/deferred"

@@ -207,14 +207,10 @@ def _bot_permissions(
     discord: DiscordRest, guild_id: str
 ) -> tuple[set[str], list[dict]] | None:
     """Bot のロールIDとギルドのロール一覧（取得できなければ None）。"""
-    try:
-        me = discord.get_me()
-        member = discord.get_guild_member(guild_id, str(me.get("id") or ""))
-        roles = discord.get_guild_roles(guild_id)
-    except Exception:  # 権限確認はベストエフォート（失敗しても選択は続行）
-        return None
-    role_ids = {str(role) for role in member.get("roles") or []}
-    return role_ids, roles
+    # 権限確認はベストエフォート（失敗しても選択は続行）
+    from .permissions import bot_roles
+
+    return bot_roles(discord, guild_id)
 
 
 def channels(

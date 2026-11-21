@@ -68,7 +68,7 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
         "bot_token": bool(config.bot_token),
         "storage": bool(config.storage_connection),
         "client_secret": bool(config.client_secret),
-        "public_key": bool(config.public_key),
+        "public_key": discord_interactions.is_valid_public_key(config.public_key),
     }
     return func.HttpResponse(
         json.dumps(body, ensure_ascii=False), status_code=200, mimetype="application/json"

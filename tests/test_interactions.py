@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from nacl.signing import SigningKey
@@ -28,12 +29,22 @@ class FakeDiscord:
         }
         self.error = error
         self.requested: list[str] = []
+        self.roles = [{"id": "222", "permissions": str(VIEW_CHANNEL | SEND_MESSAGES)}]
 
     def get_channel(self, channel_id: str) -> dict:
         self.requested.append(channel_id)
         if self.error:
             raise self.error
         return dict(self.channel, id=channel_id)
+
+    def get_me(self) -> dict:
+        return {"id": "bot-id"}
+
+    def get_guild_member(self, guild_id: str, member_id: str) -> dict:
+        return {"roles": []}
+
+    def get_guild_roles(self, guild_id: str) -> list[dict]:
+        return self.roles
 
 
 class FakeSession:
@@ -46,7 +57,8 @@ class FakeSession:
         return type("Response", (), {"status_code": self.status})()
 
 
-def signed(secret: SigningKey, payload: dict, timestamp: str = "1700000000"):
+def signed(secret: SigningKey, payload: dict, timestamp: str | None = None):
+    timestamp = timestamp or str(int(time.time()))
     body = json.dumps(payload).encode("utf-8")
     message = timestamp.encode("utf-8") + body
     signature = secret.sign(message).signature.hex()
@@ -140,10 +152,26 @@ def test_process_deferred_requires_manage_guild(secret):
     assert store.list_guilds() == []
 
 
-def test_process_deferred_warns_about_missing_send_permission(secret):
-    body, headers = signed(
-        secret, payload(app_permissions=MANAGE_GUILD | VIEW_CHANNEL)
-    )
+def test_process_deferred_warns_about_selected_channel_permission(secret):
+    """呼び出し元ではなく、通知先チャンネルの権限で警告する。"""
+    channel = {
+        "id": "111",
+        "guild_id": "222",
+        "type": 0,
+        "name": "投稿不可",
+        "permission_overwrites": [
+            {
+                "id": "222",  # @everyone
+                "type": 0,
+                "deny": str(SEND_MESSAGES),
+                "allow": "0",
+            }
+        ],
+    }
+    discord = FakeDiscord(channel=channel)
+    discord.roles = [{"id": "222", "permissions": str(VIEW_CHANNEL)}]
+    # 呼び出し元の app_permissions は十分でも、選択チャンネルは投稿不可
+    body, headers = signed(secret, payload(app_permissions=ALL_PERMS))
     store = TableStore("", service=FakeTableService())
 
     _, message = interactions.process_deferred(
@@ -151,7 +179,7 @@ def test_process_deferred_warns_about_missing_send_permission(secret):
         headers=headers,
         config=config(secret.verify_key.encode().hex()),
         store=store,
-        discord=FakeDiscord(),
+        discord=discord,
     )
 
     assert "✅" in message
@@ -169,6 +197,16 @@ def test_process_deferred_rejects_bad_signature(secret):
                 "X-Signature-Timestamp": "1700000000",
                 "X-Signature-Ed25519": "00" * 64,
             },
+            config=config(secret.verify_key.encode().hex()),
+        )
+
+
+def test_process_deferred_rejects_stale_signature(secret):
+    body, headers = signed(secret, payload(), timestamp=str(int(time.time()) - 3600))
+    with pytest.raises(interactions.SignatureError):
+        interactions.process_deferred(
+            body=body,
+            headers=headers,
             config=config(secret.verify_key.encode().hex()),
         )
 

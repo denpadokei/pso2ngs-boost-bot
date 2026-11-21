@@ -64,6 +64,10 @@ jobs:
               --settings "DISCORD_PUBLIC_KEY=$DISCORD_PUBLIC_KEY" -o none
           fi
 
+      - name: Warn when DISCORD_PUBLIC_KEY is missing
+        if: env.DISCORD_PUBLIC_KEY == ''
+        run: echo "::warning::DISCORD_PUBLIC_KEY が未設定のため deferred 署名検証が構成されません"
+
       # プランを判別してビルド方法を選ぶ（Flex と従来でパラメータが違う）。
       # App Service Plan の読み取りは Website Contributor の権限外、
       # サブスクリプション一覧もオブジェクトスコープでは空になるため、

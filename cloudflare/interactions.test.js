@@ -5,6 +5,10 @@ import worker, { patchOriginal, verifySignature } from "./interactions.js";
 
 const encoder = new TextEncoder();
 
+function nowStamp() {
+  return String(Math.floor(Date.now() / 1000));
+}
+
 function toHex(buffer) {
   return [...new Uint8Array(buffer)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -63,7 +67,7 @@ function withFetch(handler, fn) {
 test("verifySignature accepts a correctly signed body", async () => {
   const { pair, publicKeyHex } = await keypair();
   const body = encoder.encode('{"type":1}');
-  const timestamp = "1700000000";
+  const timestamp = nowStamp();
   const signature = await sign(pair, timestamp, body);
 
   assert.equal(await verifySignature(publicKeyHex, timestamp, body, signature), true);
@@ -74,7 +78,7 @@ test("verifySignature accepts a correctly signed body", async () => {
 test("PING returns type 1 without forwarding", async () => {
   const { pair, publicKeyHex } = await keypair();
   const body = encoder.encode('{"type":1}');
-  const timestamp = "1700000000";
+  const timestamp = nowStamp();
   const signature = await sign(pair, timestamp, body);
   const ctx = fakeCtx();
 
@@ -101,7 +105,7 @@ test("APPLICATION_COMMAND defers immediately and forwards the raw body", async (
     guild_id: "123",
   };
   const body = encoder.encode(JSON.stringify(payload));
-  const timestamp = "1700000000";
+  const timestamp = nowStamp();
   const signature = await sign(pair, timestamp, body);
   const ctx = fakeCtx();
   const calls = [];
@@ -134,7 +138,20 @@ test("failed signature returns 401", async () => {
   const { publicKeyHex } = await keypair();
   const body = encoder.encode('{"type":1}');
   const response = await worker.fetch(
-    interactionRequest(body, "00".repeat(64), "1700000000"),
+    interactionRequest(body, "00".repeat(64), nowStamp()),
+    { DISCORD_PUBLIC_KEY: publicKeyHex },
+    fakeCtx(),
+  );
+  assert.equal(response.status, 401);
+});
+
+test("stale signature is rejected", async () => {
+  const { pair, publicKeyHex } = await keypair();
+  const body = encoder.encode('{"type":1}');
+  const stale = String(Math.floor(Date.now() / 1000) - 3600);
+  const signature = await sign(pair, stale, body);
+  const response = await worker.fetch(
+    interactionRequest(body, signature, stale),
     { DISCORD_PUBLIC_KEY: publicKeyHex },
     fakeCtx(),
   );
@@ -144,7 +161,7 @@ test("failed signature returns 401", async () => {
 test("forward failure patches an error message to Discord", async () => {
   const { pair, publicKeyHex } = await keypair();
   const body = encoder.encode(JSON.stringify({ type: 2, token: "tok" }));
-  const timestamp = "1700000000";
+  const timestamp = nowStamp();
   const signature = await sign(pair, timestamp, body);
   const ctx = fakeCtx();
   const calls = [];
@@ -170,6 +187,77 @@ test("forward failure patches an error message to Discord", async () => {
   assert.ok(calls[1].url.includes("/webhooks/app-id/tok/messages/@original"));
   assert.equal(calls[1].init.method, "PATCH");
   assert.match(JSON.parse(calls[1].init.body).content, /設定処理に失敗しました/);
+});
+
+test("PATCH is retried once when Discord rejects it", async () => {
+  const { pair, publicKeyHex } = await keypair();
+  const body = encoder.encode(JSON.stringify({ type: 2, token: "tok" }));
+  const timestamp = nowStamp();
+  const signature = await sign(pair, timestamp, body);
+  const ctx = fakeCtx();
+  const urls = [];
+
+  await withFetch(
+    async (url) => {
+      urls.push(String(url));
+      return new Response("fail", { status: 500 });
+    },
+    async () => {
+      await worker.fetch(interactionRequest(body, signature, timestamp), {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_APPLICATION_ID: "app-id",
+        AZURE_DEFERRED_URL: "https://azure.example.com/api/interactions/deferred",
+      }, ctx);
+      await ctx.pending[0];
+    },
+  );
+
+  // Azure 1回 + PATCH 2回
+  assert.equal(urls.length, 3);
+  assert.equal(urls.filter((u) => u.includes("messages/@original")).length, 2);
+});
+
+test("permanent Azure config errors tell the user to contact an admin", async () => {
+  const { pair, publicKeyHex } = await keypair();
+  const body = encoder.encode(JSON.stringify({ type: 2, token: "tok" }));
+  const timestamp = nowStamp();
+  const signature = await sign(pair, timestamp, body);
+  const ctx = fakeCtx();
+  let patchBody;
+
+  await withFetch(
+    async (url, init) => {
+      if (String(url).includes("azure")) return new Response("no key", { status: 503 });
+      patchBody = JSON.parse(init.body);
+      return new Response("ok", { status: 200 });
+    },
+    async () => {
+      await worker.fetch(interactionRequest(body, signature, timestamp), {
+        DISCORD_PUBLIC_KEY: publicKeyHex,
+        DISCORD_APPLICATION_ID: "app-id",
+        AZURE_DEFERRED_URL: "https://azure.example.com/api/interactions/deferred",
+      }, ctx);
+      await ctx.pending[0];
+    },
+  );
+
+  assert.match(patchBody.content, /管理者に連絡してください/);
+});
+
+test("unsupported interaction types are rejected without deferring", async () => {
+  const { pair, publicKeyHex } = await keypair();
+  const body = encoder.encode(JSON.stringify({ type: 4, token: "tok" }));
+  const timestamp = nowStamp();
+  const signature = await sign(pair, timestamp, body);
+  const ctx = fakeCtx();
+
+  const response = await worker.fetch(
+    interactionRequest(body, signature, timestamp),
+    { DISCORD_PUBLIC_KEY: publicKeyHex },
+    ctx,
+  );
+  assert.equal(response.status, 400);
+  assert.equal(ctx.pending.length, 0);
 });
 
 test("patchOriginal sends ephemeral-safe content", async () => {
