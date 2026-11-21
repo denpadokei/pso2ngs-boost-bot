@@ -28,6 +28,7 @@ from pso2boost.fetch import Fetcher, SCHEDULE_URL, FetchError
 from pso2boost.maintenance import MaintenanceCalendar, fetch_calendar
 from pso2boost.models import BoostEvent, merge_events
 from pso2boost.notify import DiscordNotifier
+from pso2boost.pso2day import discover_pso2_day
 from pso2boost.schedule import DEFAULT_KEYWORDS, filter_relevant, parse_schedule_html
 from pso2boost.service import PlannedAction, enrich_event, plan_actions
 from pso2boost.state import State
@@ -36,9 +37,13 @@ from pso2boost.tz import now_jst
 
 from .config import CloudConfig
 from .discord import DiscordRest, DiscordRestError
+from .snapshot import decode_events, encode_events
 from .storage import GuildConfig, LAST_ERROR_MAX, SHARED_PARTITION, TableStore
 
 log = logging.getLogger(__name__)
+
+# /sync は週次実行のスナップショットだけを使う。更新は週次が担うため古さは問わない。
+OFFLINE_SNAPSHOT_MAX_AGE = 30 * 24 * 3600
 
 
 @dataclass
@@ -116,14 +121,20 @@ def discover_events(
     now: datetime,
     schedule_events: list[BoostEvent],
     calendar: MaintenanceCalendar,
-) -> list[BoostEvent]:
+) -> tuple[list[BoostEvent], bool]:
     """RSS から新着記事を拾い、スケジュールと合わせたイベント一覧を作る。
 
     RSS の既読は全サーバー共有（_shared パーティション）なので、
     pso2.jp への取得はサーバー数によらず1回で済む。
+
+    戻り値の bool は PSO2の日が実データ（既定値ではない）を読めたかどうか。
     """
     rss_events = discover_from_rss(fetcher, shared_state, now, calendar=calendar)
-    return filter_relevant(merge_events(schedule_events, rss_events), now)
+    pso2day = discover_pso2_day(fetcher, now)
+    events = filter_relevant(
+        merge_events(merge_events(schedule_events, rss_events), pso2day.events), now
+    )
+    return events, pso2day.ok
 
 
 def prepare_guild(
@@ -294,14 +305,26 @@ def run_weekly(
     guild_client: DiscordRest | None = None,
     api_factory: Callable[[GuildTarget], ScheduledEventsApi] | None = None,
     notifier_factory: Callable[[GuildTarget], DiscordNotifier] | None = None,
+    guild_ids: list[str] | None = None,
+    snapshot_ttl: int = 600,
+    offline: bool = False,
 ) -> RunSummary:
     """Timer から呼ばれる週次バッチの入口。
 
     排他ロックを取得できた実行だけが処理を行い、1サーバーの失敗は
     GuildResult に閉じ込めて他サーバーへ影響させない。
+
+    ``guild_ids`` を渡すと対象サーバーをそのIDに限定する（``/sync`` 用）。
+
+    ``snapshot_ttl`` 秒以内に取得したイベント一覧があれば再利用する。
+
+    ``offline=True`` のときは pso2.jp へ**一切アクセスしない**。週次実行が保存した
+    スナップショットを（古さに関わらず）適用するだけ。スナップショットが無ければ
+    スキップする。``/sync`` はこのモードで呼ぶ。
     """
     now = now or now_jst()
     summary = RunSummary()
+    degraded = False  # 情報源が既定値に退化した（同期自体は続行）
 
     if not config.bot_token:
         summary.actions.append("DISCORD_BOT_TOKEN が未設定のため何もしません")
@@ -330,6 +353,9 @@ def run_weekly(
         targets = filter_available_targets(
             targets, config, store, now, guild_client=guild_client
         )
+        if guild_ids is not None:
+            wanted = set(guild_ids)
+            targets = [target for target in targets if target.guild_id in wanted]
         summary.guilds = len(targets)
         if not targets:
             summary.actions.append("対象サーバーがありません（設定ページで登録してください）")
@@ -337,15 +363,45 @@ def run_weekly(
             log.warning("対象サーバーがありません")
             return summary
 
-        fetcher = fetcher or Fetcher(delay=config.delay)
+        fresh = False
         try:
-            calendar, schedule_events = fetch_schedule(fetcher, now, config.keywords)
-            # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
-            shared_state = store.load_state(SHARED_PARTITION, now)
-            events = discover_events(
-                fetcher, shared_state, now, schedule_events, calendar
-            )
-            store.save_state(SHARED_PARTITION, shared_state)
+            if offline:
+                # /sync はサイトへアクセスせず、週次実行の保存データだけを使う。
+                # 古さは問わない（更新は週次実行が担う）。
+                snapshot = store.load_event_snapshot(now, OFFLINE_SNAPSHOT_MAX_AGE)
+                if snapshot is None:
+                    message = "同期できるデータがありません。週次実行後に再度お試しください"
+                    summary.actions.append(message)
+                    summary.status = "skipped"
+                    log.warning(message)
+                    return summary
+                events = decode_events(snapshot)
+                calendar = MaintenanceCalendar()
+                log.info("保存済みスナップショットを適用: %d 件", len(events))
+            else:
+                snapshot = store.load_event_snapshot(now, snapshot_ttl)
+                if snapshot is not None:
+                    # 直近の取得結果を再利用
+                    events = decode_events(snapshot)
+                    calendar = MaintenanceCalendar()
+                    log.info("共有スナップショットを再利用: %d 件", len(events))
+                else:
+                    fetcher = fetcher or Fetcher(delay=config.delay)
+                    calendar, schedule_events = fetch_schedule(
+                        fetcher, now, config.keywords
+                    )
+                    # RSS の既読は全サーバー共有。ここで pso2.jp への取得は完了する
+                    shared_state = store.load_state(SHARED_PARTITION, now)
+                    events, pso2day_ok = discover_events(
+                        fetcher, shared_state, now, schedule_events, calendar
+                    )
+                    if not pso2day_ok:
+                        message = "PSO2の日の告知記事を取得・解析できず既定値で同期します"
+                        summary.actions.append(message)
+                        log.warning(message)
+                        degraded = True
+                    store.save_state(SHARED_PARTITION, shared_state)
+                    fresh = True
         except FetchError as exc:
             message = f"PSO2 データの取得に失敗: {exc}"
             summary.actions.append(message)
@@ -373,12 +429,18 @@ def run_weekly(
                     )
                 )
         # 記事本文の取得もメインスレッドで1回だけ（イベントは全サーバー共通のオブジェクト）
+        # スナップショット再利用時は詳細取得済みなので、サイトへ再アクセスしない
         enriched: set[str] = set()
-        for work in works:
-            for action in work.actions:
-                if action.event.key not in enriched:
-                    enrich_event(action.event, fetcher, now)
-                    enriched.add(action.event.key)
+        if fresh:
+            for work in works:
+                for action in work.actions:
+                    if action.event.key not in enriched:
+                        enrich_event(action.event, fetcher, now)
+                        enriched.add(action.event.key)
+            try:
+                store.save_event_snapshot(encode_events(events), now)
+            except Exception as exc:
+                log.warning("イベントスナップショットの保存に失敗（次回は再取得）: %s", exc)
 
         def run_one(work: GuildWork) -> GuildResult:
             try:
@@ -435,7 +497,7 @@ def run_weekly(
         summary.updated = sum(result.updated for result in all_results)
         summary.deleted = sum(result.deleted for result in all_results)
         summary.details = all_results
-        summary.status = "partial" if summary.failed else "ok"
+        summary.status = "partial" if (summary.failed or degraded) else "ok"
         log.info("週次同期完了: %s", summary.summary)
         return summary
     finally:

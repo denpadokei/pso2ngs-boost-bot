@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 import requests
@@ -23,11 +24,13 @@ from pso2boost.discord_events import DiscordApiError, ScheduledEventsApi
 from pso2boost.fetch import Fetcher, SCHEDULE_URL
 from pso2boost.notify import DiscordNotifier
 from pso2boost.models import BoostEvent
+from pso2boost.pso2day import PSO2_DAY_URL
 from pso2boost.periods import parse_period
 from pso2boost.tz import now_jst
 from pso2boost.rss import RSS_URL
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=None)
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def make_store() -> TableStore:
@@ -51,8 +54,15 @@ def make_config(**overrides) -> CloudConfig:
 def make_runner_context(store: TableStore, *, api_factory=None):
     for gid in ("111", "222"):
         store.upsert_guild(GuildConfig(guild_id=gid, channel_id=f"ch-{gid}"))
-    fetcher = FakeFetcher({SCHEDULE_URL: "<html></html>", RSS_URL: "<rss></rss>"})
+    fetcher = FakeFetcher(
+        {
+            SCHEDULE_URL: "<html></html>",
+            RSS_URL: "<rss></rss>",
+            PSO2_DAY_URL: (FIXTURES / "article_31542.html").read_text(encoding="utf-8"),
+        }
+    )
     notifiers: dict[str, FakeNotifier] = {}
+    api_factory = api_factory or (lambda target: FakeApi(target.guild_id))
 
     def run():
         return runner.run_weekly(

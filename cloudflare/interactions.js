@@ -68,7 +68,7 @@ function json(body, status = 200) {
 
 function logFailure(token, message, detail) {
   // トークンは相関 ID。秘密ではないが、全文を外部ログへ流さないよう末尾だけ使う。
-  console.error(`[setup][${token.slice(-8) || "-"}] ${message}`, detail ?? "");
+  console.error(`[interaction][${token.slice(-8) || "-"}] ${message}`, detail ?? "");
 }
 
 /** deferred メッセージ（考え中…）を結果本文へ差し替える。 */
@@ -110,9 +110,9 @@ async function patchWithRetry(env, token, content) {
 function errorMessage(status) {
   // 401/404/503 は再試行で直らないオペレーター要対応の設定不備
   if ([401, 403, 404, 503].includes(status)) {
-    return "⚠️ 設定処理に失敗しました（サーバー側の設定が未完了です）。管理者に連絡してください。";
+    return "⚠️ 処理に失敗しました（サーバー側の設定が未完了です）。管理者に連絡してください。";
   }
-  return "⚠️ 設定処理に失敗しました。しばらくしてからもう一度お試しください。";
+  return "⚠️ 処理に失敗しました。しばらくしてからもう一度お試しください。";
 }
 
 async function forward(env, rawBody, signature, timestamp, token) {

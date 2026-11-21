@@ -127,7 +127,7 @@ https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=17
 ### 週次 Timer
 
 1. `guilds` から `enabled=true` を全件取得
-2. PSO2 データを**1回だけ**取得（カレンダー → スケジュール → RSS → 記事）
+2. PSO2 データを**1回だけ**取得（カレンダー → スケジュール → RSS → 記事 → PSO2の日 → 番組配信ページ）
 3. イベント一覧を構築（既存 `pso2boost` のパーサを再利用）
 4. サーバーごとに並列（同時 4〜8）で処理
    - `state` を読む
@@ -412,12 +412,12 @@ docs/shared-bot.md       # この設計書
 
 ## 17. Cloudflare Workers 即 ACK プロキシ（2026-11 追加）
 
-OAuth 方式で 3 秒制約は消えたが、**`/setup` のスラッシュコマンド UX を 0 円で
+OAuth 方式で 3 秒制約は消えたが、**`/setup` / `/sync` のスラッシュコマンド UX を 0 円で
 取り戻す**ため、Discord と Azure Functions の間に Workers を 1 枚挟む方式を採用した。
 
 ```mermaid
 flowchart LR
-  U[サーバー管理者] -->|/setup #channel| D[Discord]
+  U[サーバー管理者] -->|/setup #channel または /sync| D[Discord]
   D -->|Interactions POST| W[Cloudflare Worker]
   W -->|type 5 を即返す| D
   W -->|ctx.waitUntil: 生ボディ＋署名| F[Azure /api/interactions/deferred]
@@ -430,7 +430,7 @@ flowchart LR
 | 層 | 担当 |
 |---|---|
 | Worker | Ed25519 署名検証、PING 応答、`type: 5`（defer）の即時返却、生ボディ転送、転送失敗時のエラー PATCH |
-| Azure Function | 署名再検証、`/setup` の権限・チャンネル検証、Table 保存、結果本文の PATCH |
+| Azure Function | 署名再検証、`/setup` の権限・チャンネル検証、`/sync` の手動同期、Table 保存、結果本文の PATCH |
 
 Worker には Bot トークンも状態も置かない。状態・権限ロジックは Python 側の
 1 箇所に残すため、OAuth フローと二重実装にならない。
@@ -459,5 +459,13 @@ Azure 側も always-ready を置かずオンデマンドのままなので、従
 - Discord の Interactions Endpoint URL は Worker の URL（HTTPS）。保存前に Discord
   が署名付き PING を送るため、Worker のデプロイが先。
   `PATCH /applications/@me` で API からも設定できる（`.github/workflows/deploy-worker.yml`）。
-- `/setup` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
+- `/setup` と `/sync` コマンドは `python -m cloud.commands` で再登録する（伝播は最大 1 時間）
+- `/sync` は「サーバーを管理」権限限定。呼んだサーバーだけを対象に、取得間隔を 0 にして
+  週次バッチを即時実行する（Worker の転送タイムアウト 20 秒以内に収めるため）
+- スナップショットを書き込むのは**週次自動実行だけ**。取得したイベント一覧は
+  `state` テーブルの `_shared` パーティションに保存する（`snapshot_ttl` の10分は
+  自動実行内の再利用用）。
+- `/sync` は `run_weekly(..., offline=True)` で呼び出し、保存済みスナップショットを
+  **古さに関わらず適用するだけ**。pso2.jp／告知記事／YouTube へは一切アクセスせず、
+  スナップショットが無ければスキップする（`fetcher.get` も `enrich_event` も通らない）。
 - テスト: `node --test cloudflare/*.test.js` と `python -m pytest -q tests/test_interactions.py`

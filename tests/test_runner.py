@@ -12,6 +12,7 @@ from cloud.runner import resolve_targets, run_weekly
 from cloud.storage import GuildConfig, TableStore
 from fakes import FakeApi, FakeDiscordRest, FakeFetcher, FakeNotifier, FakeTableService
 from pso2boost.fetch import SCHEDULE_URL
+from pso2boost.pso2day import PSO2_DAY_URL
 from pso2boost.rss import RSS_URL
 from pso2boost.schedule import DEFAULT_KEYWORDS
 from pso2boost.tz import JST
@@ -31,6 +32,8 @@ def make_fetcher() -> FakeFetcher:
             SCHEDULE_URL: load("schedule.html"),
             RSS_URL: load("pso2news.xml"),
             ARTICLE_URL: load("article_32486.html"),
+            PSO2_DAY_URL: load("article_31542.html"),
+            "https://youtube.com/live/NhXOlE19k8k": load("youtube_headline.html"),
         }
     )
 
@@ -60,7 +63,7 @@ def make_run(guild_specs: list[tuple[str, str, bool]], guild_status: dict[str, i
 
     guild_client = FakeDiscordRest(guild_status)
 
-    def run(config=None, fetcher=None):
+    def run(config=None, fetcher=None, **kwargs):
         return run_weekly(
             config or make_config(),
             now=NOW,
@@ -69,6 +72,7 @@ def make_run(guild_specs: list[tuple[str, str, bool]], guild_status: dict[str, i
             guild_client=guild_client,
             api_factory=lambda target: apis[target.guild_id],
             notifier_factory=lambda target: notifiers[target.guild_id],
+            **kwargs,
         )
 
     return store, apis, notifiers, run
@@ -114,8 +118,144 @@ def test_pso2_pages_are_fetched_once_for_two_guilds():
     run(fetcher=fetcher)
 
     # どの URL も1回しか取得していない（Fetcher のキャッシュ経由）
-    for url in (SCHEDULE_URL, RSS_URL, ARTICLE_URL):
+    for url in (
+        SCHEDULE_URL,
+        RSS_URL,
+        ARTICLE_URL,
+        PSO2_DAY_URL,
+        "https://youtube.com/live/NhXOlE19k8k",
+    ):
         assert fetcher.requested.count(url) == 1, url
+
+
+def test_snapshot_reuses_events_without_fetching_again():
+    """直近の取得結果は共有され、2回目はサイトへアクセスしない。"""
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    api = FakeApi("111")
+    notifier = FakeNotifier("chan-A")
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: api,
+        notifier_factory=lambda target: notifier,
+    )
+
+    first = run_weekly(**kwargs)
+    assert first.guilds == 1
+    assert fetcher.requested  # 初回はサイトを取得
+
+    fetcher.requested.clear()
+    second = run_weekly(**kwargs)
+
+    assert fetcher.requested == []  # 2回目はスナップショットを再利用
+    assert second.notified == 0  # 二重通知しない
+
+
+def test_offline_sync_never_fetches_site():
+    """offline=True ではサイトへアクセスせず、保存済みデータだけを使う。"""
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: FakeApi("111"),
+        notifier_factory=lambda target: FakeNotifier("chan-A"),
+    )
+
+    # スナップショットが無い場合は取得せずスキップ
+    summary = run_weekly(**kwargs, offline=True)
+    assert summary.status == "skipped"
+    assert fetcher.requested == []
+    assert any("週次実行" in action for action in summary.actions)
+
+    # 週次実行が保存したスナップショットは古くても使う
+    run_weekly(**kwargs)
+    snapshot = store.load_event_snapshot(NOW, 600)
+    assert snapshot is not None
+    fetcher.requested.clear()
+
+    later = datetime(2026, 12, 1, 12, 0, tzinfo=JST)
+    summary = run_weekly(**dict(kwargs, now=later), offline=True)
+
+    assert summary.status == "ok"
+    assert fetcher.requested == []
+
+
+def test_snapshot_ttl_zero_forces_refetch():
+    from cloud.runner import run_weekly
+
+    store = TableStore("unused", service=FakeTableService())
+    store.ensure_tables()
+    store.upsert_guild(GuildConfig(guild_id="111", channel_id="chan-A"))
+    fetcher = make_fetcher()
+    kwargs = dict(
+        config=make_config(),
+        now=NOW,
+        store=store,
+        fetcher=fetcher,
+        guild_client=FakeDiscordRest(),
+        api_factory=lambda target: FakeApi("111"),
+        notifier_factory=lambda target: FakeNotifier("chan-A"),
+    )
+
+    run_weekly(**kwargs)
+    fetcher.requested.clear()
+    run_weekly(**kwargs, snapshot_ttl=0)
+
+    assert fetcher.requested  # キャッシュ無効なら再取得する
+
+
+def test_run_weekly_can_limit_to_single_guild():
+    """``/sync`` 用に対象サーバーを限定できる。"""
+    store, apis, notifiers, run = make_run(
+        [("111", "chan-A", False), ("222", "chan-B", False)]
+    )
+
+    summary = run(guild_ids=["111"])
+
+    assert summary.guilds == 1
+    assert notifiers["111"].sent
+    assert notifiers["222"].sent == []
+    assert apis["222"].created == []
+
+
+def test_pso2_day_events_are_included_in_shared_bot():
+    """共有Botでも PSO2の日のレア泥期間とNGSヘッドラインが通知される。"""
+    store, apis, notifiers, run = make_run([("111", "chan-A", False)])
+
+    summary = run()
+
+    assert summary.failed == 0
+    names = [payload["name"] for payload in apis["111"].created]
+    pso2day = [payload for payload in apis["111"].created if "PSO2の日" in payload["name"]]
+    # 11/1～3 は期限切れで除外され、11/21～23 と12月の2回が残る
+    assert len(pso2day) == 3
+    assert any("レアドロップ倍率+100%" in payload["description"] for payload in pso2day)
+    assert all(PSO2_DAY_URL in payload["description"] for payload in pso2day)
+    assert any(kind == "new" for kind, _, _ in notifiers["111"].sent)
+
+    # NGSヘッドラインは開始（21:00）から1時間（22:00）のイベントになる
+    headline = [
+        payload for payload in apis["111"].created if "NGS ヘッドライン" in payload["name"]
+    ]
+    assert len(headline) == 1
+    assert headline[0]["start"].hour == 21
+    assert headline[0]["end"].hour == 22
 
 
 def test_guild_failure_does_not_block_others():
