@@ -18,6 +18,7 @@ from .maintenance import fetch_calendar
 from .models import BoostEvent, merge_events
 from .notify import DiscordNotifier
 from .periods import parse_period
+from .pso2day import discover_pso2_day
 from .schedule import DEFAULT_KEYWORDS, filter_relevant, parse_schedule_html
 from .service import enrich_event, plan_actions
 from .state import State
@@ -115,10 +116,13 @@ def cmd_check(args) -> int:
         log.error("イベントスケジュールを取得できませんでした: %s", exc)
 
     rss_events = discover_from_rss(fetcher, state, now, calendar=calendar)
-    if not schedule_ok and not rss_events:
+    pso2day = discover_pso2_day(fetcher, now)
+    if not schedule_ok and not rss_events and not pso2day.fetched:
         return 2
 
-    events = filter_relevant(merge_events(schedule_events, rss_events), now)
+    events = filter_relevant(
+        merge_events(merge_events(schedule_events, rss_events), pso2day.events), now
+    )
     log.info("%d 件のブースト関連イベントを確認しました", len(events))
 
     api = _discord_api()
@@ -197,9 +201,9 @@ def cmd_list(args) -> int:
         return 2
 
     calendar = fetch_calendar(fetcher, now)
-    events = filter_relevant(
-        parse_schedule_html(html, now, _keywords(), calendar=calendar), now
-    )
+    schedule_events = parse_schedule_html(html, now, _keywords(), calendar=calendar)
+    pso2day = discover_pso2_day(fetcher, now)
+    events = filter_relevant(merge_events(schedule_events, pso2day.events), now)
     if args.json:
         print(
             json.dumps(
