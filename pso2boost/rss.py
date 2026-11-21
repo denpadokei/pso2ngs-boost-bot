@@ -5,12 +5,15 @@ RSS 1.0 (RDF) 形式。記事の新着を早く拾うために使う。
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 from .fetch import SITE
+
+log = logging.getLogger(__name__)
 
 RSS_URL = SITE + "/players/pso2news.xml"
 
@@ -37,7 +40,8 @@ class FeedItem:
 def parse_rss(xml_text: str) -> list[FeedItem]:
     try:
         root = ElementTree.fromstring(xml_text)
-    except ElementTree.ParseError:
+    except ElementTree.ParseError as exc:
+        log.warning("RSS のパースに失敗しました（先頭: %s）: %s", xml_text[:120], exc)
         return []
 
     items: list[FeedItem] = []

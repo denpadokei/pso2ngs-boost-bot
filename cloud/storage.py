@@ -23,10 +23,26 @@ log = logging.getLogger(__name__)
 GUILD_PARTITION = "guild"
 SHARED_PARTITION = "_shared"  # 全サーバー共有の RSS 既読などを置く予約パーティション
 SESSION_PARTITION = "_session"  # 設定フローのサーバー側セッション
+LOCK_PARTITION = "_lock"  # 週次バッチの排他ロック
+LOCK_ROW = "weekly"
+LOCK_TTL_SECONDS = 10 * 60
 EVENT_ROW_PREFIX = "event:"
 RSS_ROW_PREFIX = "rss:"
 
 LAST_ERROR_MAX = 200
+
+
+class LockConflict(RuntimeError):
+    """排他ロックが既に取得されている。"""
+
+
+def _expiry(row: dict) -> int:
+    """セッション/ロック行の exp を安全に読む（壊れていれば期限切れ扱い）。"""
+    try:
+        return int(row.get("exp") or 0)
+    except (TypeError, ValueError):
+        log.warning("期限時刻を解釈できない行があります: %s", row.get("RowKey"))
+        return 0
 
 
 @dataclass
@@ -211,6 +227,14 @@ class _TableServiceAdapter:
         # 既定の UpdateMode.MERGE なので、部分更新でも他の列は消えない
         self._client.get_table_client(name).upsert_entity(entity)
 
+    def create_entity(self, name: str, entity: dict) -> None:
+        from azure.core.exceptions import ResourceExistsError
+
+        try:
+            self._client.get_table_client(name).create_entity(entity)
+        except ResourceExistsError as exc:  # 競合は LockConflict に変換
+            raise LockConflict("entity already exists") from exc
+
     def delete_entity(self, name: str, partition_key: str, row_key: str) -> None:
         self._client.get_table_client(name).delete_entity(
             partition_key=partition_key, row_key=row_key
@@ -280,6 +304,14 @@ class TableStore:
             },
         )
 
+    def set_permissions_ok(self, guild_id: str, ok: bool) -> None:
+        """実行時に判明した投稿権限の状態を更新する（MERGE で他列は保持）。"""
+        if guild_id in {g.guild_id for g in self.list_guilds()}:
+            self._service.upsert_entity(
+                self.guilds_table,
+                {"PartitionKey": GUILD_PARTITION, "RowKey": guild_id, "permissions_ok": bool(ok)},
+            )
+
     def disable_guild(self, guild_id: str, now: datetime, reason: str) -> None:
         """Bot がキックされるなどしたサーバーを停止する（未登録なら何もしない）。
 
@@ -325,18 +357,20 @@ class TableStore:
         for row in rows:
             if str(row.get("RowKey", "")) != session_id:
                 continue
-            if int(row.get("exp") or 0) < int(now.timestamp()):
+            if _expiry(row) < int(now.timestamp()):
                 self._service.delete_entity(self.state_table, SESSION_PARTITION, session_id)
                 return None
             try:
                 guilds = json.loads(row.get("guilds") or "[]")
             except (TypeError, json.JSONDecodeError):
-                guilds = []
+                log.warning("セッションのサーバー一覧が壊れています: %s", session_id)
+                self._service.delete_entity(self.state_table, SESSION_PARTITION, session_id)
+                return None
             return {
                 "uid": str(row.get("uid", "")),
                 "name": str(row.get("name", "")),
                 "guilds": [str(guild) for guild in guilds],
-                "exp": int(row.get("exp") or 0),
+                "exp": _expiry(row),
             }
         return None
 
@@ -351,12 +385,55 @@ class TableStore:
         )
         removed = 0
         for row in rows:
-            if int(row.get("exp") or 0) < int(now.timestamp()):
+            if _expiry(row) < int(now.timestamp()):
                 self._service.delete_entity(
                     self.state_table, SESSION_PARTITION, str(row.get("RowKey", ""))
                 )
                 removed += 1
         return removed
+
+    # ------------------------------------------------------------------ lock
+    def try_acquire_lock(self, now: datetime, owner: str) -> bool:
+        """週次バッチの排他ロックを取得する（TTL失効分は奪う）。"""
+        entity = {
+            "PartitionKey": LOCK_PARTITION,
+            "RowKey": LOCK_ROW,
+            "owner": owner,
+            "exp": int(now.timestamp()) + LOCK_TTL_SECONDS,
+        }
+        try:
+            self._service.create_entity(self.state_table, entity)
+            return True
+        except LockConflict:
+            rows = self._service.list_entities(
+                self.state_table, query=f"PartitionKey eq '{LOCK_PARTITION}'"
+            )
+            existing = next(
+                (row for row in rows if str(row.get("RowKey")) == LOCK_ROW), None
+            )
+            if existing is not None and _expiry(existing) < int(now.timestamp()):
+                self._service.delete_entity(self.state_table, LOCK_PARTITION, LOCK_ROW)
+                try:
+                    self._service.create_entity(self.state_table, entity)
+                    return True
+                except LockConflict:
+                    return False
+            return False
+
+    def release_lock(self, owner: str) -> None:
+        """自分のロックだけを解放する（TTL奪取後に他人のを消さない）。"""
+        try:
+            rows = self._service.list_entities(
+                self.state_table, query=f"PartitionKey eq '{LOCK_PARTITION}'"
+            )
+            existing = next(
+                (row for row in rows if str(row.get("RowKey")) == LOCK_ROW), None
+            )
+            if existing is None or str(existing.get("owner") or "") != owner:
+                return
+            self._service.delete_entity(self.state_table, LOCK_PARTITION, LOCK_ROW)
+        except Exception:  # TTL で失効するため、解放失敗は致命的ではない
+            log.warning("ロックの解放に失敗しました（TTLで失効します）")
 
     # ----------------------------------------------------------------- state
     def load_state(self, guild_id: str, now: datetime) -> State:

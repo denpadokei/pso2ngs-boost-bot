@@ -254,7 +254,8 @@ def test_duplicate_check_ignores_completed_events(tmp_path: Path):
     assert result.created == 1
 
 
-def test_duplicate_check_failure_falls_back_to_create(tmp_path: Path):
+def test_duplicate_check_failure_skips_creation(tmp_path: Path):
+    """一覧取得失敗時は、重複を避けるため新規作成しない（欠落を選ぶ）。"""
     event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
     state = State(tmp_path / "state.json", NOW)
     api = FakeApi()
@@ -262,8 +263,10 @@ def test_duplicate_check_failure_falls_back_to_create(tmp_path: Path):
 
     result = sync_events([event], state, api, NOW)
 
-    assert result.created == 1
-    assert len(api.created) == 1
+    assert result.created == 0
+    assert result.errors == 1
+    assert result.error_messages
+    assert api.created == []
 
 
 def test_duplicate_reuse_dry_run_does_not_touch_api_or_state(tmp_path: Path):

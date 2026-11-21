@@ -3,6 +3,8 @@ from datetime import datetime
 import pytest
 from unittest.mock import MagicMock
 
+from azure.data.tables import TableClient, TableServiceClient
+
 from cloud.storage import (
     GUILD_PARTITION,
     GuildConfig,
@@ -189,7 +191,7 @@ def test_real_sdk_surface_matches_adapter():
         assert callable(getattr(service_client, method)), method
 
     # アダプタが使う TableClient のメソッド
-    for method in ("query_entities", "upsert_entity", "delete_entity"):
+    for method in ("query_entities", "upsert_entity", "delete_entity", "create_entity"):
         assert hasattr(table_client, method), method
         assert callable(getattr(table_client, method)), method
 
@@ -299,3 +301,18 @@ def test_delete_session_and_prune():
     store.delete_session("live")
     keys = {row["RowKey"] for row in service.list_entities(store.state_table)}
     assert "live" not in keys
+
+
+def test_adapter_maps_resource_exists_to_lock_conflict():
+    from azure.core.exceptions import ResourceExistsError
+
+    from cloud.storage import LockConflict, _TableServiceAdapter
+
+    service = MagicMock()
+    table = MagicMock()
+    table.create_entity.side_effect = ResourceExistsError("already exists")
+    service.get_table_client.return_value = table
+    adapter = _TableServiceAdapter(service)
+
+    with pytest.raises(LockConflict):
+        adapter.create_entity("state", {"PartitionKey": "_lock", "RowKey": "weekly"})

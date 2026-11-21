@@ -158,7 +158,7 @@ def test_callback_handles_access_denied():
         cookies={},
         session=FakeOAuthSession(),
     )
-    assert "キャンセル" in page.body
+    assert "認可が拒否されました" in page.body
 
 
 # ------------------------------------------------------------------ 3. チャンネル
@@ -573,6 +573,7 @@ def test_save_succeeds_when_permission_lookup_fails():
         discord=BrokenBot(CHANNELS),
     )
 
-    assert "✅" in page.body
+    assert "通知先を" in page.body
+    # 権限を確認できなかった場合は True と捏造せず、警告を表示する
     assert "権限を確認できませんでした" in page.body
     assert {g.guild_id: g for g in store.list_guilds()}["111"].permissions_ok is False

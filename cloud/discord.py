@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import requests
@@ -72,13 +73,37 @@ class DiscordRest:
         self.session.headers.update({"Authorization": f"Bot {token}"})
 
     def get(self, path: str) -> Any:
-        response = self.session.get(API_BASE + path, timeout=self.timeout)
-        if response.status_code >= 400:
-            raise DiscordRestError(
-                f"HTTP {response.status_code}: {response.text[:200]}",
-                status_code=response.status_code,
-            )
-        return response.json()
+        """REST GET。429/5xx は再試行し、接続例外は DiscordRestError に正規化する。"""
+        last_error = ""
+        for attempt in range(1, 4):
+            try:
+                response = self.session.get(API_BASE + path, timeout=self.timeout)
+            except requests.RequestException as exc:
+                raise DiscordRestError(
+                    f"Discord への接続に失敗: {exc}", status_code=0
+                ) from exc
+            if response.status_code == 429 and attempt < 3:
+                try:
+                    wait = float(response.json().get("retry_after", 1.0))
+                except ValueError:
+                    wait = 1.0
+                time.sleep(min(wait, 5.0))
+                last_error = "rate limited"
+                continue
+            if response.status_code >= 500 and attempt < 3:
+                last_error = f"HTTP {response.status_code}"
+                time.sleep(2**attempt)
+                continue
+            if response.status_code >= 400:
+                raise DiscordRestError(
+                    f"HTTP {response.status_code}: {response.text[:200]}",
+                    status_code=response.status_code,
+                )
+            try:
+                return response.json()
+            except ValueError:
+                raise DiscordRestError("Discord の応答 JSON が不正です") from None
+        raise DiscordRestError(f"Discord への取得に失敗: {last_error}")
 
     def get_channel(self, channel_id: str) -> dict:
         return self.get(f"/channels/{channel_id}")

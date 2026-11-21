@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Mapping
 
 from pso2boost.schedule import DEFAULT_KEYWORDS
+
+log = logging.getLogger(__name__)
 
 
 def _keywords(raw: str) -> tuple[str, ...]:
@@ -16,17 +19,21 @@ def _keywords(raw: str) -> tuple[str, ...]:
     return tuple(word.strip() for word in raw.split(",") if word.strip())
 
 
-def _float(raw: str, default: float) -> float:
+def _float(raw: str, default: float, name: str = "") -> float:
     try:
         return float(raw)
     except (TypeError, ValueError):
+        if raw:
+            log.warning("設定 %s の値を解釈できません: %s（既定値 %s を使います）", name, raw, default)
         return default
 
 
-def _int(raw: str, default: int) -> int:
+def _int(raw: str, default: int, name: str = "") -> int:
     try:
         return int(raw)
     except (TypeError, ValueError):
+        if raw:
+            log.warning("設定 %s の値を解釈できません: %s（既定値 %s を使います）", name, raw, default)
         return default
 
 
@@ -65,7 +72,9 @@ class CloudConfig:
             channel_id=env.get("DISCORD_CHANNEL_ID", "").strip(),
             notify_style=env.get("NOTIFY_STYLE", "discal").strip() or "discal",
             keywords=_keywords(env.get("BOOST_KEYWORDS", "")),
-            delay=_float(env.get("PSO2_FETCH_DELAY", ""), 1.0),
-            concurrency=_int(env.get("CLOUD_CONCURRENCY", ""), 4),
-            state_retention_days=_int(env.get("CLOUD_STATE_RETENTION_DAYS", ""), 30),
+            delay=_float(env.get("PSO2_FETCH_DELAY", ""), 1.0, "PSO2_FETCH_DELAY"),
+            concurrency=_int(env.get("CLOUD_CONCURRENCY", ""), 4, "CLOUD_CONCURRENCY"),
+            state_retention_days=_int(
+                env.get("CLOUD_STATE_RETENTION_DAYS", ""), 30, "CLOUD_STATE_RETENTION_DAYS"
+            ),
         )

@@ -137,6 +137,7 @@ def cmd_check(args) -> int:
 
     new_count = 0
     reminder_count = 0
+    failed_count = 0
     enriched_keys: set[str] = set()
 
     for action in plan_actions(events, state, now):
@@ -148,23 +149,30 @@ def cmd_check(args) -> int:
 
         if action.kind == "new":
             log.info("新着: %s (%s)", event.label, event.period.display())
-            notifier.send_event(event, "new", event_link(event), now=now)
-            new_count += 1
-            if not effective_dry_run:
-                state.mark_seen(event)
-                state.mark_sent("new", event.key)
-        elif action.kind == "start":
-            log.info("開始リマインド: %s", event.label)
-            notifier.send_event(event, "start", event_link(event), now=now)
-            reminder_count += 1
-            if not effective_dry_run:
-                state.mark_sent("start", event.key)
         else:
-            log.info("終了リマインド: %s", event.label)
-            notifier.send_event(event, "end", event_link(event), now=now)
+            log.info(
+                "%s: %s",
+                "開始リマインド" if action.kind == "start" else "終了リマインド",
+                event.label,
+            )
+        sent = notifier.send_event(event, action.kind, event_link(event), now=now)
+        if action.kind == "new":
+            new_count += 1
+        else:
             reminder_count += 1
-            if not effective_dry_run:
-                state.mark_sent("end", event.key)
+
+        if effective_dry_run:
+            continue
+        if not sent:
+            # 投稿に失敗したらフラグを立てず、次回の実行で再試行する
+            log.error("通知に失敗したため状態を進めません: %s (%s)", event.label, action.kind)
+            failed_count += 1
+            continue
+        if action.kind == "new":
+            state.mark_seen(event)
+            state.mark_sent("new", event.key)
+        else:
+            state.mark_sent(action.kind, event.key)
 
     if not effective_dry_run:
         state.prune()
@@ -176,7 +184,7 @@ def cmd_check(args) -> int:
         reminder_count,
         "(dry-run のため未保存)" if effective_dry_run else f"{len(state)} 件",
     )
-    return 0
+    return 2 if failed_count else 0
 
 
 def cmd_list(args) -> int:
@@ -344,7 +352,9 @@ def cmd_test_notify(args) -> int:
     sent = notifier.send_event(event, "new", now=now)
     if sent:
         print("テスト通知を送信しました。")
-    return 0
+        return 0
+    log.error("テスト通知を送信できませんでした（DISCORD_WEBHOOK_URL / Bot の権限を確認）")
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

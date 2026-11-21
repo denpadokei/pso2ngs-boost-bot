@@ -37,6 +37,7 @@ class SyncResult:
     skipped: int = 0
     errors: int = 0
     links: dict[str, str] = field(default_factory=dict)
+    error_messages: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> str:
@@ -133,15 +134,20 @@ def sync_events(
 
     existing_cache: list[dict] | None = None
 
-    def existing_events() -> list[dict]:
-        """既存イベント一覧を1回だけ取得する（失敗時は空で続行）。"""
+    def existing_events() -> list[dict] | None:
+        """既存イベント一覧。取得失敗時は None（＝新規作成を止める）。"""
         nonlocal existing_cache
         if existing_cache is None:
             try:
                 existing_cache = api.list()
             except DiscordApiError as exc:
-                log.warning("Discord 側の既存イベントを取得できませんでした: %s", exc)
-                existing_cache = []
+                log.error(
+                    "Discord 側の既存イベントを取得できませんでした（新規作成をスキップ）: %s",
+                    exc,
+                )
+                result.errors += 1
+                result.error_messages.append(f"既存イベント確認失敗: {exc}")
+                return None  # 空リストと混同しない
         return existing_cache
 
     for event in events:
@@ -158,6 +164,7 @@ def sync_events(
                 except DiscordApiError as exc:
                     log.error("イベント削除に失敗 (%s): %s", event.label, exc)
                     result.errors += 1
+                    result.error_messages.append(f"削除失敗「{event.label}」: {exc}")
                     continue
                 state.remove_discord_event(event.key)
             result.deleted += 1
@@ -174,7 +181,11 @@ def sync_events(
         payload, signature = built
 
         if entry is None:
-            duplicate = find_duplicate(existing_events(), payload)
+            existing = existing_events()
+            if existing is None:
+                # 一覧が確認できない間に作ると重複する。欠落を選んで次回に回す
+                continue
+            duplicate = find_duplicate(existing, payload)
             if duplicate is not None:
                 # 状態が失われた場合や、別経路（セルフホスト版など）で作られた
                 # 同名・同時刻のイベントと重複しないよう、既存を再利用する
@@ -217,6 +228,7 @@ def sync_events(
                 except DiscordApiError as exc:
                     log.error("イベント作成に失敗 (%s): %s", event.label, exc)
                     result.errors += 1
+                    result.error_messages.append(f"作成失敗「{event.label}」: {exc}")
                     continue
                 state.set_discord_event(
                     event.key,
@@ -246,6 +258,7 @@ def sync_events(
             if "HTTP 404" not in str(exc):
                 log.error("イベント更新に失敗 (%s): %s", event.label, exc)
                 result.errors += 1
+                result.error_messages.append(f"更新失敗「{event.label}」: {exc}")
                 continue
             # 別サーバーの状態を引き継いだ場合など、Discord 側に存在しない
             log.warning("Discord 側にイベントが無いため作り直します: %s", event.label)
@@ -255,6 +268,7 @@ def sync_events(
             except DiscordApiError as create_exc:
                 log.error("イベント作成に失敗 (%s): %s", event.label, create_exc)
                 result.errors += 1
+                result.error_messages.append(f"作り直し失敗「{event.label}」: {create_exc}")
                 continue
             state.set_discord_event(
                 event.key,
@@ -300,9 +314,11 @@ def _delete_stale(
         try:
             end = datetime.fromisoformat(raw_end)
         except (TypeError, ValueError):
+            log.warning("終了時刻を解釈できないため追跡を諦めます: %s", key)
+            state.remove_discord_event(key)
             continue
         if end.tzinfo is None:
-            continue
+            end = end.replace(tzinfo=timezone.utc)  # 旧データはUTCとして扱う
         if end >= now - timedelta(days=retention_days):
             continue
         if dry_run:
@@ -317,6 +333,7 @@ def _delete_stale(
                 continue
             log.error("イベント削除に失敗 (%s): %s", entry.get("name") or key, exc)
             result.errors += 1
+            result.error_messages.append(f"削除失敗「{entry.get('name') or key}」: {exc}")
             continue
         state.remove_discord_event(key)
         result.deleted += 1

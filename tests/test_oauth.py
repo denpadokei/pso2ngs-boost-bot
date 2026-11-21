@@ -22,6 +22,7 @@ def test_authorize_url_contains_scope_and_state():
     assert oauth.SETUP_SCOPES == "identify guilds"
     assert query["state"] == ["abcdef"]
     assert query["response_type"] == ["code"]
+    assert "prompt" not in query  # 初回認可の同意画面を堵がないため prompt=none は使わない
 
 
 def test_make_state_is_random_and_long():
