@@ -1,240 +1,56 @@
-# PSO2NGS ブーストキャンペーン Discord 通知
+# PSO2NGS ブーストキャンペーン Discord 通知（共有Bot）
 
 『PSO2 ニュージェネシス』の**ブーストキャンペーン**（レアドロップ倍率アップなど）を検知して、
-Discord のチャンネルへ自動投稿する小さなツールです。
-DisCal のような「イベント告知 + カレンダー運用」を、このツールだけで完結できます。
+Discord のチャンネルへ自動投稿する Bot です。**この Bot は既に運用中で、招待するだけで使えます。**
 
 - 新しく告知されたブーストを通知
 - 開始日・終了日（通常は水曜）の実行時にリマインド
 - 対象クエスト、全プレイヤー／プレミアムの倍率差も表示
 - Discord の**スケジュールイベント**（RSVP 付き）も自動作成・更新
-- Gateway 接続なし。常駐サーバー不要（GitHub Actions の無料枠で運用できます）
+- 常駐サーバー不要（毎週水曜 13:00 JST に自動実行）
 
-> **このリポジトリはテンプレートです。**
-> GitHub の「Use this template」→「Create a new repository」で自分のリポジトリを作り、
-> Secrets を設定すれば、そのまま自分のサーバー用に動きます。
-> 各自が自分の Bot / Webhook を使う前提なので、OAuth アプリの実装や共有サーバーは不要です。
-> `data/state.json` は動作状態です。テンプレートから作った場合は削除して構いません
-> （初回に現在の予定が通知され、Discord 側にイベントが無ければ自動で作り直します）。
+## 使い方
 
-1つの Bot を複数サーバーに配る「共有Bot」として運用する場合の設計は
-[docs/shared-bot.md](docs/shared-bot.md) にまとめています（OAuth 設定フロー ＋
-Azure Functions の週次バッチ ＋ Cloudflare Workers の即 ACK プロキシ）。
+### 1. Bot をサーバーに招待する
 
-## 仕組み
-
-情報源は公式プレイヤーズサイトと、番組の配信ページ（YouTube）です。
-
-| 取得元 | 用途 |
-| --- | --- |
-| `https://pso2.jp/players/pso2news.xml` | 新着記事の検知（RSS 1.0 / RDF） |
-| `https://pso2.jp/players/schedule/` | ブーストキャンペーンの一覧と開催期間（リマインドの基準） |
-| `https://pso2.jp/players/news/maintenance/` | メンテナンス予定表（「メンテナンス開始／終了」の実時刻） |
-| `https://pso2.jp/players/news/31542/` | 「PSO2の日」の毎月開催日とレアドロップ倍率 |
-| RSS の MEDIA 項目 → YouTube Live | 「NGS ヘッドライン WAVE」の配信開始時刻 |
-| 告知記事の本文（例: `/players/news/32486/`） | 対象クエスト、レアドロップ倍率などの詳細 |
-
-メンテナンス告知には「12月2日（水）8:00 ～ 17:00」のような**未来の予定**が載るので、
-これを読み取って期間の「メンテナンス開始／終了」を実時刻に置き換えます。
-取得できない場合だけ 11:00 を仮置きします。
-
-RSS で新しい告知記事を拾い、本文に「倍率アップ」「成功率アップ」「○%オフ」のような
-効果の表があればイベント化します。見出しが「ブーストキャンペーン」でなくても、
-「装備強化応援キャンペーン」のような効果系キャンペーンを拾えるのが特徴です。
-スケジュールページに「ブーストキャンペーン 第1弾」のように期間付きで掲載される場合は、
-記事タイトルに「ブースト」がなくても検知できます。
-同じイベントは「ラベル + 期間」から作るキーで同一視するので、RSS とスケジュールの
-両方に出てきても二重通知にはなりません。
-
-**「PSO2の日」**（毎月1～3日・21～23日のレアドロップ倍率アップ）は専用の告知記事
-`/players/news/31542/` を読み、当月と翌月の開催回を生成します。毎月繰り返されるため、
-RSS の新着検知（直近14日）だけでは取りこぼすためです。記事の開催日・倍率が読めない場合は
-既定値（1～3日・21～23日、レアドロップ倍率+100%／プレミアム+50%）を使います。
-情報源を取得・解析できず既定値に倒れた場合はログと実行サマリに記録されます。
-
-**「NGS ヘッドライン WAVE」** は RSS の MEDIA 項目（リンク先は YouTube Live）から検知します。
-配信ページの `scheduledStartTime` を開始時刻とし、**終了時刻は明記されないため開始から1時間**
-でイベント化します。配信ページが読めない場合はタイトルの放送日と番組の定型開始時刻（21:00）から
-推定します。
-
-## クイックスタート
-
-### 1. 必要なもの
-
-- Python 3.10 以上
-- Discord サーバーの「チャンネルを管理」権限（Webhook を使う場合）
-- Bot を作る場合は「イベントの作成」「イベントの管理」権限
-
-### 2. 投稿先を用意する
-
-**A. Webhook（いちばん簡単）**
-
-Discord で通知したいチャンネルを右クリック →「チャンネルの編集」→「連携サービス」
-→「ウェブフックを作成」→ 名前を決めて「ウェブフック URL をコピー」。
-
-**B. Bot（イベントも作るならこちら）**
-
-後述の「Discord のイベント（RSVP 付き）を作る」で Bot を作り、
-`DISCORD_BOT_TOKEN` と `DISCORD_CHANNEL_ID` を設定すれば、Webhook なしで投稿できます。
-両方設定した場合は Webhook が優先されます。
-
-### 3. ローカルで動かす
-
-```bash
-cd pso2ngs-boost-bot
-python -m pip install -r requirements.txt
-copy .env.example .env        # macOS / Linux は cp
-```
-
-`.env` に URL を書きます。
-
-```dotenv
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/....
-```
-
-動作確認：
-
-```bash
-# 現在の予定を表示
-python -m pso2boost list
-
-# 通知内容を確認（投稿しない）
-python -m pso2boost check --dry-run
-
-# Webhook の疎通確認
-python -m pso2boost test-notify
-
-# 本番（状態を保存して投稿）
-python -m pso2boost check
-```
-
-`check` を cron などで週1回（水曜 13:00 JST）実行すれば運用できます。
-サーバーが UTC の場合は `0 4 * * 3` を指定してください。
-
-```cron
-# 毎週水曜 13:00（サーバーが JST の場合）
-0 13 * * 3 cd /path/to/pso2ngs-boost-bot && /usr/bin/python3 -m pso2boost check
-```
-
-### 4. GitHub Actions で無料運用する
-
-1. このフォルダを GitHub リポジトリへ push
-2. リポジトリの **Settings → Secrets and variables → Actions** に
-   `DISCORD_WEBHOOK_URL` を登録
-   （Bot で投稿・イベント作成する場合は `DISCORD_BOT_TOKEN`、`DISCORD_GUILD_ID`、
-   必要なら `DISCORD_CHANNEL_ID` と `DISCORD_MENTION_ROLE_ID` も）
-3. **Settings → Actions → General → Workflow permissions** を
-   「Read and write permissions」に変更
-4. `.github/workflows/boost.yml` が毎週水曜 13:00（JST）に実行されます（手動実行も可）
-
-ワークフローは実行のたびに `data/state.json` をコミットして「通知済み」を覚えます。
-このコミットは、GitHub の「60日間更新がないとスケジュール実行が止まる」仕様の回避も兼ねています。
-
-## Discord のイベント（RSVP 付き）を作る
-
-DisCal の置き換えとして、Discord 標準のスケジュールイベントも作成できます。
-サーバーの「イベント」タブに表示され、メンバーは「興味あり」で RSVP できます。
-
-### 1. Bot を作る
-
-1. [Discord Developer Portal](https://discord.com/developers/applications) →「New Application」
-2. 「General Information」の **Application ID** を控える（招待 URL の `client_id` に使います）
-3. 左メニュー「Bot」→「Reset Token」→ トークンをコピー
-4. 次の URL の `<APPLICATION_ID>` を置き換えて開き、サーバーを選んで認証
+「サーバーを管理」権限を持つメンバーが、次の URL を開いてサーバーを選びます。
 
 ```
-https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=17600775982080
+https://discord.com/oauth2/authorize?client_id=1572407928101806202&scope=bot&permissions=17600775982080
 ```
 
-権限を個別に選びたい場合は「OAuth2」→「URL Generator」で scope `bot` を選び、
-**イベントの作成 / イベントの管理**（Bot で投稿するなら **メッセージを送信** と
-**チャンネルを見る**）にチェックして生成します。
+### 2. 通知先チャンネルを設定する
 
-| 権限 | ビット | 用途 |
-| --- | --- | --- |
-| イベントの作成 (Create Events) | `1 << 44` | イベント作成。2026年2月以降は必須 |
-| イベントの管理 (Manage Events) | `1 << 33` | イベントの更新・削除 |
-| メッセージを送信 (Send Messages) | `1 << 11` | Bot で通知を投稿する場合 |
-| チャンネルを見る (View Channels) | `1 << 10` | 同上 |
-
-権限の合計は `17600775979008`（イベントのみ）、
-`17600775982080`（+ 投稿）です。
-
-補足：
-
-- この Bot は Gateway に接続しないため、メンバー一覧では**オフライン表示のまま**です（正常）。
-- Privileged Intents（Message Content / Server Members）は不要です。
-- 招待直後に 403 が出る場合は、サーバー設定 → ロール で Bot の権限を確認してください。
-
-### 2. 設定する
-
-```dotenv
-DISCORD_BOT_TOKEN=あなたのBotトークン
-DISCORD_GUILD_ID=サーバーID                     # Bot が1サーバーだけなら省略可
-DISCORD_CHANNEL_ID=投稿先チャンネルID           # 名前で指定するなら不要
-# DISCORD_CHANNEL_NAME=テスト                   # # は付けなくてよい
-```
-
-`DISCORD_GUILD_ID` を省略すると、Bot が参加しているサーバーが1つの場合だけ自動で判定します。
-`DISCORD_CHANNEL_ID` の代わりに `DISCORD_CHANNEL_NAME` を指定すると、名前から解決します。
-
-サーバーID・チャンネルIDは、Discord の設定 →「詳細設定」→「開発者モード」を有効にして、
-サーバー名／チャンネル名を右クリック →「IDをコピー」で取得できます。
-Webhook で投稿する場合は `DISCORD_CHANNEL_ID` は不要です。
-
-ID を調べるのが面倒な場合は、Bot トークンだけで一覧を出せます。
-
-```bash
-python -m pso2boost channels
-```
+**スラッシュコマンドでの設定がおすすめです。** サーバー内で次を実行します（管理者のみ）。
 
 ```
-デンパの鯖  DISCORD_GUILD_ID=123456789012345678
-  #テスト  DISCORD_CHANNEL_ID=123456789012345678
-  #general  DISCORD_CHANNEL_ID=123456789012345679
+/setup #通知先チャンネル
 ```
 
-招待画面でサーバーは選べますが、その ID はアプリに渡りません。
-チャンネルは招待では選べないため、上のコマンドか `DISCORD_CHANNEL_NAME` を使ってください。
+設定が完了すると「✅ 通知先を #チャンネル に設定しました」と返ります。
 
-```bash
-python -m pso2boost check --dry-run
-```
-
-で `[dry-run] イベント作成: ...` と出れば設定できています。
-
-### 動き
-
-- 未来に開始するキャンペーンだけイベントを作成（開始済みはスキップ）
-- 名前・期間・場所・説明が変わったら自動で更新
-- 終了から7日たったイベントは削除
-- **同名・同時刻のイベントが既にあれば作成せず再利用**（重複防止。
-  状態ファイルを消した場合や、セルフホスト版と併用している場合でも二重にならない）
-- 通知メッセージには「イベント」リンク（`https://discord.com/events/...`）が付く
-
-Discord 側の制限で、1サーバーにつき `SCHEDULED` / `ACTIVE` のイベントは最大100件です。
-時刻が「メンテナンス開始」の場合はメンテナンス予定表の時刻を使います（取得できなければ 11:00 JST）。
-
-## コマンド
+**ブラウザ（OAuth）からでも設定できます。** 次のページで Discord に認証して
+サーバーとチャンネルを選んでください（コマンドが使えない場合の代替手段です）。
 
 ```
-python -m pso2boost check      # 新着・開始・終了を確認して通知
-python -m pso2boost list       # 現在のブースト予定を表示（--json 可）
-python -m pso2boost channels   # Bot の参加サーバーとチャンネルIDを表示
-python -m pso2boost preview URL  # 告知記事の解析結果を表示（デバッグ用）
-python -m pso2boost test-notify  # Webhook の疎通確認
+https://pso2ngs-boost-bot.azurewebsites.net/api/setup
 ```
 
-共通オプション：
+### 3. 通知を待つ／今すぐ反映する
 
-- `--dry-run` — 投稿せず内容を標準出力へ
-- `--now 2026-11-25T09:30` — 基準日時を上書き（テスト用）
-- `--delay 1.0` — リクエスト間隔（秒）
-- `--state PATH` — 状態ファイル（既定 `data/state.json`）
+毎週水曜 13:00 (JST) に、新着・開始・終了の通知とスケジュールイベントの作成・更新が行われます。
+次の水曜まで待たずに反映したい場合は、次のいずれかで即時同期できます。
 
-## 通知イメージ
+- サーバー内で `/sync` を実行（管理者のみ、呼んだサーバーだけが対象）
+- 設定完了ページの「今すぐイベントを同期する」ボタン
 
-`NOTIFY_STYLE=discal`（既定）では、DisCal のイベント告知に寄せたカード形式で投稿します。
+`/sync` は pso2.jp へアクセスせず、週次実行が保存した予定を適用します。
+まだ週次実行が済んでいない場合は「週次実行後に再度お試しください」と表示されます。
+
+Bot をサーバーから抜くと、次回のバッチで自動的に停止します。
+再度使いたい場合は、手順 1・2 をやり直してください。
+
+## 届く通知の例
 
 ```
 !~Event Announcement~!
@@ -244,180 +60,17 @@ Description: ・レアドロップ倍率+100%
 Start (Local): 2026年11月11日 水曜日 12:00
 End (Local):   2026年11月18日 水曜日 11:00
 Location: アークス双陣杯 / 星砕の暴進
-Premium: ・レアドロップ倍率+50%
-         ・プリセット能力付与倍率+50%
 Event ID: 79c8704046d6
-イベント: RSVP / イベントページ
-告知記事: PSO2NGS 公式サイト
 ```
 
-開始・終了リマインドでは Description の先頭に `【本日から】` / `【本日まで】` が付きます。
-`NOTIFY_STYLE=compact` にすると、以前のシンプルな埋め込みに戻せます。
+開始・終了リマインドでは `【本日から】` / `【本日まで】` が付きます。
 
-## 設定
+## 開発者向け
 
-| 環境変数 | 説明 |
-| --- | --- |
-| `DISCORD_WEBHOOK_URL` | Webhook で投稿する場合の URL |
-| `DISCORD_BOT_TOKEN` | Discord イベントを作る場合の Bot トークン |
-| `DISCORD_GUILD_ID` | Discord イベントを作る場合のサーバー ID（1サーバーなら省略可） |
-| `DISCORD_CHANNEL_ID` | Webhook を使わず Bot で投稿する場合のチャンネル ID |
-| `DISCORD_CHANNEL_NAME` | チャンネル名で指定する場合（ID より簡単） |
-| `DISCORD_MENTION_ROLE_ID` | 新着通知でメンションするロール ID（任意） |
-| `DISCORD_WEBHOOK_USERNAME` | 投稿名（任意。既定は Webhook の名前） |
-| `DISCORD_WEBHOOK_AVATAR_URL` | アイコン画像 URL（任意） |
-| `NOTIFY_STYLE` | `discal`（既定）または `compact` |
-| `STATE_PATH` | 状態ファイルのパス（任意） |
-| `BOOST_KEYWORDS` | 検知語を変えたい場合（カンマ区切り、既定 `ブースト,強化応援`） |
+セルフホスト（自分の Bot / Webhook で動かす）手順、CLI、設定一覧、テストは
+[docs/development.md](docs/development.md) に移管しました。
 
-## リマインドの動き
-
-実行は週1回（水曜 13:00 JST）を前提にしています。
-
-- 新着：RSS で記事を検知、またはスケジュールに新しい行が現れた時点で投稿（同じ期間のイベントは一度だけ）
-- 開始：開始日（通常は水曜）の実行時に「本日から」
-- 終了：終了日（通常は水曜）の実行時に「本日まで」。
-  終了時刻（11:00 など）を過ぎてから実行された場合は「終了しました」に切り替わります
-- 告知と開始が同じ日なら、開始リマインドは省略
-- RSS は直近 14 日分の記事だけを対象にします（初回実行時の過去記事掘りすぎ防止）
-
-`メンテナンス開始` のような境界は、メンテナンス告知の予定表から実時刻を取得します。
-取得できなかった場合のみ 11:00 JST を仮の境界として扱います。
-
-## テスト
-
-```bash
-python -m pytest -q
-```
-
-`tests/fixtures/` に、公式ページから解析に必要な要素だけを抜き出した HTML / XML を置いてあり、
-ネットワークなしで解析を検証できます（詳細は `tests/fixtures/README.md`）。
-Azure への接続は Fake に差し替えてあり、追加のインストールは不要です。
-
-## 共有Bot（1つの Bot を複数サーバーへ）
-
-1つの Bot を複数サーバーへ配る構成です。
-サーバーごとの通知先は **OAuth2 認可による設定ページ**で登録します
-（旧方式の `/setup` スラッシュコマンドは、Flex プランの起動待ちが Discord の
-「3秒以内の応答」制約に間に合わないことがあったため廃止しました）。
-設計の詳細は [docs/shared-bot.md](docs/shared-bot.md) を参照してください。
-
-- 各サーバーの管理者がブラウザで **設定ページ** を開いて通知先チャンネルを指定
-- Azure Functions の Timer が毎週水曜 13:00 (JST) に全サーバーへ一括同期
-  （通知・スケジュールイベント作成。pso2.jp への取得は週1回だけ）
-- 状態は Azure Table Storage（サーバーごとにパーティション）
-- セルフホスト配布（この README の前半）は今までどおり単独で使えます
-
-### 1. Bot を作って招待する
-
-1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリを作成
-2. 「General Information」の **Application ID** を控える
-3. 「Bot」でトークンをリセットしてコピー
-4. 次の URL で各サーバーへ招待
-
-```
-https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=17600775982080
-```
-
-権限は「イベントの作成 / イベントの管理 / メッセージを送信 / チャンネルを見る」
-（合計 `17600775982080`）です。
-
-### 2. OAuth2 の設定を登録する（1回だけ）
-
-Developer Portal の **OAuth2** ページで:
-
-1. **Redirects** に次を追加します:
-
-```
-https://<function-app-name>.azurewebsites.net/api/setup/callback
-```
-
-2. **Client Secret** を作成します（次のステップで Function App へ登録します）
-
-### 3. Azure 側を用意する（1回だけ）
-
-Function App（**Consumption 系 / Linux / Python 3.12**）と Storage Account を作成します。
-プランはどちらでも動きます（デプロイ時のワークフローが自動で判別します）:
-
-- **Flex Consumption**（現在のポータルの既定・推奨）— インスタンスサイズは **2048MB** で十分です
-  （このBotの実行は週1回・数分のバッチと低頻度の設定ページだけです）
-- **従来の Consumption** — インスタンスサイズの選択はありません（固定）
-
-作成後、Function App の **アプリ設定** に以下を登録します。
-
-| アプリ設定 | 値 |
-| --- | --- |
-| `DISCORD_BOT_TOKEN` | Bot トークン |
-| `DISCORD_CLIENT_SECRET` | OAuth2 の Client Secret |
-| `AZURE_STORAGE_CONNECTION_STRING` | Storage Account の接続文字列（未設定なら `AzureWebJobsStorage` を使う） |
-
-Azure リソースの作成はドキュメントの手順に沿って手動で行ってください
-（このリポジトリには IaC を含みません）。
-
-### 4. GitHub Actions で自動デプロイ
-
-`main` へ push すると OIDC 認証でデプロイされます（`.github/workflows/deploy-cloud.yml`）。
-リポジトリの **Settings → Secrets and variables → Actions → Variables** に登録してください
-（Secrets ではありません）。
-
-| 変数 | 値 |
-| --- | --- |
-| `AZURE_CLIENT_ID` | ユーザー割り当てマネージド ID のクライアント ID |
-| `AZURE_TENANT_ID` | テナント ID |
-| `AZURE_SUBSCRIPTION_ID` | サブスクリプション ID |
-| `AZURE_FUNCTIONAPP_NAME` | Function App の名前（**未設定ならデプロイはスキップ**） |
-| `AZURE_RESOURCE_GROUP` | Function App のリソースグループ名（ワークフローのプラン判別に使う） |
-
-マネージド ID への **Website Contributor** ロール付与とフェデレーション資格情報の
-作成手順は [docs/shared-bot.md](docs/shared-bot.md) §10 を参照してください。
-
-デプロイ後の確認:
-
-```bash
-curl https://<function-app-name>.azurewebsites.net/api/health
-```
-
-### 5. サーバー管理者が設定ページを開く
-
-「サーバーを管理」権限を持つメンバーが、ブラウザで次を開きます
-（Bot の「プロフィールを見る」→「サーバープロフィール」などにも載せられます）:
-
-```
-https://<function-app-name>.azurewebsites.net/api/setup
-```
-
-1. Discord の認可画面で許可すると、**管理権限のあるサーバー一覧**が表示されます
-2. サーバーを選ぶと **テキストチャンネル一覧**（Bot が見えるもの）が出ます
-   - Bot が未参加のサーバーなら、そのサーバー用の招待 URL が表示されます
-3. チャンネルを選んで「設定する」→ 「✅ 通知先を #チャンネル に設定しました」
-
-- アクセストークンは認可コードの交換に1回だけ使われ、保存されません
-- 次の水曜 13:00 (JST) から通知とイベント作成が始まります
-- **待たずに今すぐ反映したい場合**: 設定完了ページの「今すぐイベントを同期する」
-  ボタン（`/api/setup/sync`）、または Discord で **`/sync`** を実行すると即時同期できます
-  （新着通知とイベント作成・更新。10秒〜1分ほどかかります）。`/sync` は
-  「サーバーを管理」権限を持つメンバーだけが使え、呼んだサーバーだけが対象です。
-  **pso2.jp へは一切アクセスしません**。週次自動実行が保存した予定を適用するだけなので、
-  まだ週次実行が済んでいない場合は「週次実行後に再度お試しください」と表示されます。
-
-Bot をサーバーから抜くと、次回のバッチで自動的に停止（`enabled=false`）になります。
-設定ページで再度設定すれば再開できます。
-
-## 注意事項
-
-- 非公式ツールです。SEGA とは関係ありません。
-- ページ構造が変わると解析できなくなることがあります。その場合は `preview` で確認してください。
-- 取得は週 1 回、リクエスト間隔 1 秒を既定にしています。間隔を詰めすぎないでください。
-- 運営の告知内容・期間は変更されることがあります。最終的な判断は公式サイトをご確認ください。
-- Discord イベントの開始・終了時刻は、メンテナンス予定表から取得します。
-  取得できなかった場合のみ「メンテナンス開始」を 11:00 JST と仮定します。
-
-## 公開リポジトリで使う場合
-
-- Secrets（`DISCORD_BOT_TOKEN`、`DISCORD_WEBHOOK_URL` など）はリポジトリごとに設定してください。fork には引き継がれません。
-- `.env` は `.gitignore` 済みです。コミットしないでください。
-- `data/state.json` は実行状態です。公開情報と Discord のイベント ID だけを保存し、サーバー ID は含めません。テンプレートとして使う場合は削除して構いません。
-- 定期実行は default ブランチのワークフローだけが動きます。fork して試す場合は手動実行（workflow_dispatch）を使ってください。
+共有Botの設計・Azure リソース・デプロイ運用は [docs/shared-bot.md](docs/shared-bot.md) を参照してください。
 
 ## ライセンス
 
@@ -425,3 +78,4 @@ Bot をサーバーから抜くと、次回のバッチで自動的に停止（`
 
 非公式ツールです。SEGA とは関係ありません。
 `tests/fixtures/` のページ抜粋の権利は SEGA に帰属します。
+運営の告知内容・期間は変更されることがあります。最終的な判断は公式サイトをご確認ください。
