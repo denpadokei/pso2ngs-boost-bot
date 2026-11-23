@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from .article import events_from_article, parse_article_html
 from .fetch import FetchError, Fetcher
+from .headline import event_from_headline, is_headline_item
 from .models import BoostEvent
 from .rss import RSS_URL, parse_rss
 from .state import State
@@ -36,7 +37,8 @@ def discover_from_rss(
 
     events: list[BoostEvent] = []
     for item in parse_rss(xml_text):
-        if not item.is_site_page:
+        headline = is_headline_item(item)
+        if not item.is_site_page and not headline:
             continue
         if item.published is not None:
             published = to_jst(item.published)
@@ -49,6 +51,17 @@ def discover_from_rss(
             html = fetcher.get(item.link)
         except FetchError as exc:
             log.warning("記事を取得できませんでした (%s): %s", item.link, exc)
+            continue
+
+        if headline:
+            found_headline = event_from_headline(item, html, now)
+            if found_headline is None:
+                # 解析失敗は既読にしない（次回の RSS ポーリングで再試行する）
+                log.warning("NGSヘッドラインを解析できなかったため再試行します: %s", item.link)
+                continue
+            state.mark_rss(item.link)
+            log.info("RSS から番組を検出: %s", found_headline.label)
+            events.append(found_headline)
             continue
 
         state.mark_rss(item.link)
