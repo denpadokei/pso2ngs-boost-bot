@@ -59,6 +59,27 @@ def test_create_sends_external_event_payload():
     assert payload["scheduled_end_time"]
 
 
+def test_update_details_sends_no_scheduled_times():
+    """開始済みイベントには時刻を送らず、場所だけを部分更新する。"""
+    api, session = api_with([FakeResponse(204)])
+    api.update_details(
+        "999",
+        name="x" * 120,
+        description="説明",
+        location="場所",
+    )
+
+    method, url, payload = session.calls[0]
+    assert method == "PATCH"
+    assert url.endswith("/guilds/123/scheduled-events/999")
+    assert payload["entity_metadata"] == {"location": "場所"}
+    assert payload["description"] == "説明"
+    assert len(payload["name"]) == 100
+    assert "scheduled_start_time" not in payload
+    assert "scheduled_end_time" not in payload
+    assert "entity_type" not in payload
+
+
 def test_delete_accepts_204():
     api, session = api_with([FakeResponse(204)])
     api.delete("999")
@@ -122,6 +143,7 @@ def test_error_raises_with_body():
         api.delete("1")
     assert "403" in str(excinfo.value)
     assert "Missing Permissions" in str(excinfo.value)
+    assert excinfo.value.status_code == 403
 
 
 def test_invite_url_contains_recommended_permissions():

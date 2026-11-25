@@ -125,6 +125,15 @@ def cmd_check(args) -> int:
     )
     log.info("%d 件のブースト関連イベントを確認しました", len(events))
 
+    actions = plan_actions(events, state, now)
+    # 共有 Bot と同じく、同期前に記事の詳細を揃える。
+    # 開始済みイベントは contents だけ更新するため、詳細が無いと古い場所のままになる。
+    enriched_keys: set[str] = set()
+    for action in actions:
+        if action.event.key not in enriched_keys:
+            _enrich(action.event, fetcher, now)
+            enriched_keys.add(action.event.key)
+
     api = _discord_api()
     sync_result = None
     if api is not None:
@@ -142,14 +151,9 @@ def cmd_check(args) -> int:
     new_count = 0
     reminder_count = 0
     failed_count = 0
-    enriched_keys: set[str] = set()
 
-    for action in plan_actions(events, state, now):
+    for action in actions:
         event = action.event
-        # 同じイベントへの複数通知で、記事の取得・解析は1回だけ
-        if event.key not in enriched_keys:
-            _enrich(event, fetcher, now)
-            enriched_keys.add(event.key)
 
         if action.kind == "new":
             log.info("新着: %s (%s)", event.label, event.period.display())

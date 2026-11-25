@@ -8,6 +8,7 @@ from pso2boost.sync import build_payload, sync_events
 from pso2boost.tz import JST
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=JST)
+STARTED_NOW = datetime(2026, 11, 25, 13, 0, tzinfo=JST)
 
 
 class FakeApi:
@@ -37,6 +38,9 @@ class FakeApi:
         return f"ev{self._counter}"
 
     def update(self, event_id: str, **kwargs) -> None:
+        self.updated.append((event_id, kwargs))
+
+    def update_details(self, event_id: str, **kwargs) -> None:
         self.updated.append((event_id, kwargs))
 
     def delete(self, event_id: str) -> None:
@@ -107,6 +111,124 @@ def test_skips_already_started_event(tmp_path: Path):
 
     assert result.skipped == 1
     assert api.created == []
+
+
+def test_started_event_location_is_updated_when_details_arrive(tmp_path: Path):
+    """開始後に詳細が分かっても Discord 側の場所を更新する（不具合の再発防止）。"""
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    event.quests = []
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+
+    sync_events([event], state, api, NOW)
+    assert api.created[0]["location"] == "すべてのクエスト"
+
+    event.quests = ["リレーションクエスト", "星砕の暴進"]
+    result = sync_events([event], state, api, STARTED_NOW)
+
+    assert result.created == 0
+    assert result.updated == 1
+    assert len(api.updated) == 1
+    event_id, kwargs = api.updated[0]
+    assert event_id == "ev1"
+    assert kwargs["location"] == "リレーションクエスト / 星砕の暴進"
+    # 開始済みなので開始時刻・終了時刻は送らない
+    assert "start" not in kwargs
+    assert "end" not in kwargs
+    assert state.discord_event(event.key)["signature"].startswith("details:")
+
+
+def test_started_event_is_not_updated_twice(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+
+    sync_events([event], state, api, STARTED_NOW)
+    api.updated.clear()
+    result = sync_events([event], state, api, STARTED_NOW)
+
+    assert result.updated == 0
+    assert api.updated == []
+
+
+def test_start_transition_without_content_change_does_not_patch(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+
+    sync_events([event], state, api, NOW)
+    result = sync_events([event], state, api, STARTED_NOW)
+
+    assert result.updated == 0
+    assert api.updated == []
+    assert state.discord_event(event.key)["signature"].startswith("details:")
+
+
+def test_started_event_without_state_is_only_skipped(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+
+    result = sync_events([event], state, api, STARTED_NOW)
+
+    assert result.skipped == 1
+    assert api.created == []
+    assert api.updated == []
+
+
+def test_ended_event_is_not_updated(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第1弾", "11/11 12:00～11/18 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    state.set_discord_event(event.key, {"id": "ev1", "signature": "old"})
+    api = FakeApi()
+
+    result = sync_events([event], state, api, STARTED_NOW, retention_days=30)
+
+    assert result.updated == 0
+    assert api.updated == []
+
+
+def test_dry_run_started_event_update_does_not_touch_api_or_state(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    state.set_discord_event(event.key, {"id": "ev1", "signature": "old"})
+    api = FakeApi()
+
+    result = sync_events([event], state, api, STARTED_NOW, dry_run=True)
+
+    assert result.updated == 1
+    assert api.updated == []
+    assert state.discord_event(event.key)["signature"] == "old"
+
+
+def test_not_found_is_detected_by_status_code():
+    from pso2boost.discord_events import DiscordApiError
+    from pso2boost.sync import _is_not_found
+
+    assert _is_not_found(DiscordApiError("no marker", status_code=404))
+    assert not _is_not_found(DiscordApiError("HTTP 404 in body", status_code=400))
+
+
+class NotFoundDetailsApi(FakeApi):
+    def update_details(self, event_id, **kwargs) -> None:
+        from pso2boost.discord_events import DiscordApiError
+
+        raise DiscordApiError("HTTP 404: Unknown Guild Scheduled Event")
+
+
+def test_started_event_404_stops_tracking_without_recreating(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    state.set_discord_event(event.key, {"id": "ev1", "signature": "old"})
+    api = NotFoundDetailsApi()
+
+    result = sync_events([event], state, api, STARTED_NOW)
+
+    assert result.errors == 1
+    assert result.error_messages
+    assert result.links == {}
+    assert api.created == []
+    assert state.discord_event(event.key) is None
 
 
 def test_deletes_after_retention(tmp_path: Path):
@@ -227,6 +349,21 @@ def test_second_run_after_reuse_does_not_touch_api(tmp_path: Path):
     assert result.created == 0
     assert result.updated == 0
     assert api.updated == []
+
+
+def test_duplicate_check_ignores_non_external_events(tmp_path: Path):
+    """音声チャンネル型イベントは場所が更新できないため再利用しない。"""
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+    duplicate = _existing_event(event)
+    duplicate["entity_type"] = 2
+    api.existing = [duplicate]
+
+    result = sync_events([event], state, api, NOW)
+
+    assert result.created == 1
+    assert api.created
 
 
 def test_duplicate_check_ignores_different_start(tmp_path: Path):

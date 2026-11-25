@@ -102,6 +102,9 @@ class FakeApi:
     def update(self, event_id: str, **kwargs) -> None:
         self.updated.append((event_id, kwargs))
 
+    def update_details(self, event_id: str, **kwargs) -> None:
+        self.updated.append((event_id, kwargs))
+
     def delete(self, event_id: str) -> None:
         self.deleted.append(event_id)
 

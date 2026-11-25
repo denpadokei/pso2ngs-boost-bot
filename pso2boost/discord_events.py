@@ -37,6 +37,10 @@ RECOMMENDED_PERMISSIONS = (
 class DiscordApiError(RuntimeError):
     """Discord API がエラーを返した。"""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def invite_url(client_id: str, permissions: int = RECOMMENDED_PERMISSIONS) -> str:
     return (
@@ -105,6 +109,29 @@ class ScheduledEventsApi:
         payload = _payload(name, description, start, end, location)
         self._request("PATCH", self._item_url(event_id), payload)
 
+    def update_details(
+        self,
+        event_id: str,
+        *,
+        name: str,
+        description: str,
+        location: str,
+    ) -> None:
+        """開始済みイベントの内容だけを部分更新する（時刻は送らない）。
+
+        開始時刻が過去のイベントに PATCH で開始時刻を送ると Discord に拒否される。
+        開催中に告知記事の詳細が分かった場合などは、名前・説明・場所だけを更新する。
+        entity_metadata は EXTERNAL イベントでしか意味を持たないため、この Bot が
+        作成・再利用した EXTERNAL イベントにだけ呼び出すこと。
+        """
+        payload: dict[str, Any] = {
+            "name": name[:100],
+            "entity_metadata": {"location": (location or "PSO2NGS")[:100]},
+        }
+        if description:
+            payload["description"] = description[:1000]
+        self._request("PATCH", self._item_url(event_id), payload)
+
     def delete(self, event_id: str) -> None:
         self._request("DELETE", self._item_url(event_id))
 
@@ -152,7 +179,8 @@ class ScheduledEventsApi:
                 continue
             if response.status_code >= 400:
                 raise DiscordApiError(
-                    f"HTTP {response.status_code}: {response.text[:400]}"
+                    f"HTTP {response.status_code}: {response.text[:400]}",
+                    status_code=response.status_code,
                 )
             if response.status_code == 204 or not response.content:
                 return None
