@@ -136,9 +136,14 @@ def cmd_check(args) -> int:
 
     api = _discord_api()
     sync_result = None
+    sync_failures = 0
     if api is not None:
         sync_result = sync_events(events, state, api, now, dry_run=effective_dry_run)
         log.info("Discord イベント同期: %s", sync_result.summary)
+        for message in sync_result.error_messages:
+            log.error("Discord イベント同期に失敗: %s", message)
+        if not effective_dry_run:
+            sync_failures = sync_result.errors
     elif not args.dry_run:
         log.info(
             "DISCORD_BOT_TOKEN / DISCORD_GUILD_ID が未設定のため、"
@@ -192,7 +197,7 @@ def cmd_check(args) -> int:
         reminder_count,
         "(dry-run のため未保存)" if effective_dry_run else f"{len(state)} 件",
     )
-    return 2 if failed_count else 0
+    return 2 if failed_count or sync_failures else 0
 
 
 def cmd_list(args) -> int:

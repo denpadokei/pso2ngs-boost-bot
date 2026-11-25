@@ -148,11 +148,9 @@ def find_duplicate(events: list[dict], payload: dict) -> dict | None:
             continue
         if str(candidate.get("status") or "").lower() in {"completed", "canceled"}:
             continue
-        # EXTERNAL 以外は entity_metadata.location が Discord に無視されるため再利用しない
-        if (
-            candidate.get("entity_type") is not None
-            and candidate.get("entity_type") != ENTITY_TYPE_EXTERNAL
-        ):
+        # EXTERNAL 以外（種別不明を含む）は entity_metadata.location が Discord に
+        # 無視されるため再利用しない
+        if candidate.get("entity_type") != ENTITY_TYPE_EXTERNAL:
             continue
         if str(candidate.get("name") or "") != name:
             continue

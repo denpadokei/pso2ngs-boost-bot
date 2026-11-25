@@ -164,6 +164,22 @@ def test_start_transition_without_content_change_does_not_patch(tmp_path: Path):
     assert state.discord_event(event.key)["signature"].startswith("details:")
 
 
+def test_dry_run_start_transition_does_not_rewrite_state(tmp_path: Path):
+    event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
+    state = State(tmp_path / "state.json", NOW)
+    api = FakeApi()
+
+    sync_events([event], state, api, NOW)
+    before = state.discord_event(event.key)
+    api.updated.clear()
+
+    result = sync_events([event], state, api, STARTED_NOW, dry_run=True)
+
+    assert result.updated == 1
+    assert api.updated == []
+    assert state.discord_event(event.key) == before
+
+
 def test_started_event_without_state_is_only_skipped(tmp_path: Path):
     event = make_event("ブーストキャンペーン 第2弾", "11/25 12:00～12/2 メンテナンス開始まで")
     state = State(tmp_path / "state.json", NOW)
@@ -315,6 +331,7 @@ def _existing_event(event: BoostEvent, status: str = "scheduled") -> dict:
         "name": event.label,
         "scheduled_start_time": event.period.start.at.isoformat(),
         "scheduled_end_time": event.period.end.at.isoformat(),
+        "entity_type": 3,
         "status": status,
     }
 
