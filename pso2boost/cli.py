@@ -125,11 +125,25 @@ def cmd_check(args) -> int:
     )
     log.info("%d 件のブースト関連イベントを確認しました", len(events))
 
+    actions = plan_actions(events, state, now)
+    # 共有 Bot と同じく、同期前に記事の詳細を揃える。
+    # 開始済みイベントは contents だけ更新するため、詳細が無いと古い場所のままになる。
+    enriched_keys: set[str] = set()
+    for action in actions:
+        if action.event.key not in enriched_keys:
+            _enrich(action.event, fetcher, now)
+            enriched_keys.add(action.event.key)
+
     api = _discord_api()
     sync_result = None
+    sync_failures = 0
     if api is not None:
         sync_result = sync_events(events, state, api, now, dry_run=effective_dry_run)
         log.info("Discord イベント同期: %s", sync_result.summary)
+        for message in sync_result.error_messages:
+            log.error("Discord イベント同期に失敗: %s", message)
+        if not effective_dry_run:
+            sync_failures = sync_result.errors
     elif not args.dry_run:
         log.info(
             "DISCORD_BOT_TOKEN / DISCORD_GUILD_ID が未設定のため、"
@@ -142,14 +156,9 @@ def cmd_check(args) -> int:
     new_count = 0
     reminder_count = 0
     failed_count = 0
-    enriched_keys: set[str] = set()
 
-    for action in plan_actions(events, state, now):
+    for action in actions:
         event = action.event
-        # 同じイベントへの複数通知で、記事の取得・解析は1回だけ
-        if event.key not in enriched_keys:
-            _enrich(event, fetcher, now)
-            enriched_keys.add(event.key)
 
         if action.kind == "new":
             log.info("新着: %s (%s)", event.label, event.period.display())
@@ -188,7 +197,7 @@ def cmd_check(args) -> int:
         reminder_count,
         "(dry-run のため未保存)" if effective_dry_run else f"{len(state)} 件",
     )
-    return 2 if failed_count else 0
+    return 2 if failed_count or sync_failures else 0
 
 
 def cmd_list(args) -> int:

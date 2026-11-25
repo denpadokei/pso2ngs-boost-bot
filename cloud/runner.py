@@ -81,6 +81,13 @@ class GuildResult:
         return self.errors == 0
 
 
+def _append_error(result: GuildResult, message: str) -> None:
+    """同じ実行で複数の失敗があっても、先に記録した原因を消さない。"""
+    result.last_error = " / ".join(
+        part for part in (result.last_error, message) if part
+    )[:LAST_ERROR_MAX]
+
+
 @dataclass
 class RunSummary:
     guilds: int = 0
@@ -170,7 +177,7 @@ def process_guild(
     result.errors += sync_result.errors
     if sync_result.errors:
         detail = " / ".join(sync_result.error_messages[:2])
-        result.last_error = f"Discord イベントの同期に失敗: {detail}"[:LAST_ERROR_MAX]
+        _append_error(result, f"Discord イベントの同期に失敗: {detail}")
 
     notifier = notifier or _make_notifier(config, target)
     for action in work.actions:
@@ -185,11 +192,12 @@ def process_guild(
             disabled_reason = getattr(notifier, "disabled_reason", "") or ""
             status = getattr(notifier, "last_status", None)
             if disabled_reason:
-                result.last_error = f"{action.kind} の投稿先が未設定です（{disabled_reason}）"
+                _append_error(result, f"{action.kind} の投稿先が未設定です（{disabled_reason}）")
             elif status in (403, 404):
-                result.last_error = (
+                _append_error(
+                    result,
                     f"{action.kind} の投稿が拒否されました (HTTP {status}): "
-                    "チャンネルの投稿権限を確認してください"
+                    "チャンネルの投稿権限を確認してください",
                 )
                 try:
                     store.set_permissions_ok(target.guild_id, False)
@@ -197,7 +205,7 @@ def process_guild(
                     log.warning("permissions_ok の更新に失敗: %s", target.guild_id)
             else:
                 detail = f" (HTTP {status})" if status else ""
-                result.last_error = f"{action.kind} 通知の送信に失敗{detail}"
+                _append_error(result, f"{action.kind} 通知の送信に失敗{detail}")
             continue
         result.notified += 1
         # 投稿に成功したものだけフラグを立てる（失敗は次回再試行）
@@ -213,7 +221,7 @@ def process_guild(
         except Exception as exc:
             log.error("通知後の状態保存に失敗 (%s): %s", target.guild_id, exc)
             result.errors += 1
-            result.last_error = f"通知後の状態保存に失敗（次回重複の可能性）: {exc}"
+            _append_error(result, f"通知後の状態保存に失敗（次回重複の可能性）: {exc}")
 
     work.state.prune(days=config.state_retention_days)
     try:
@@ -221,7 +229,7 @@ def process_guild(
     except Exception as exc:
         log.error("最終状態の保存に失敗 (%s): %s", target.guild_id, exc)
         result.errors += 1
-        result.last_error = f"最終状態の保存に失敗（次回重複の可能性）: {exc}"
+        _append_error(result, f"最終状態の保存に失敗（次回重複の可能性）: {exc}")
     return result
 
 
@@ -472,6 +480,10 @@ def run_weekly(
         # 準備失敗も含めて結果を記録する
         all_results = results + prepare_failures
         for result in all_results:
+            if result.last_error:
+                summary.actions.append(
+                    f"サーバー {result.guild_id}: {result.last_error}"[:160]
+                )
             try:
                 store.record_guild_run(
                     result.guild_id, now,

@@ -4,6 +4,7 @@
   イベントが既にある場合は作成せず再利用する（state が失われた場合や、
   セルフホスト版など別経路で作られたイベントとの重複を防ぐ）
 - 変更: 名前・期間・場所・説明が変わったら更新
+- 開始済み: 開始時刻は触らず、名前・場所・説明だけ更新（告知の詳細が後から分かるため）
 - 終了: 終了から一定日数たったら削除（履歴を残しすぎない）
 
 すでに開始済みのキャンペーンは、Discord 側の開始時刻を偽装できないため作成しない。
@@ -17,7 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .discord_events import DiscordApiError, ScheduledEventsApi
+from .discord_events import ENTITY_TYPE_EXTERNAL, DiscordApiError, ScheduledEventsApi
 from .models import BoostEvent
 from .state import State
 
@@ -47,6 +48,17 @@ class SyncResult:
         )
 
 
+def _description_lines(event: BoostEvent) -> list[str]:
+    lines = [f"・{value}" for value in event.buffs_all]
+    if event.buffs_premium:
+        lines.append("プレミアムセット有効期間中:")
+        lines += [f"・{value}" for value in event.buffs_premium]
+    lines.append(f"開催期間: {event.period.display()}")
+    if event.url:
+        lines.append(f"告知: {event.url}")
+    return lines
+
+
 def build_payload(event: BoostEvent, now: datetime) -> tuple[dict, str] | None:
     """Discord に送る内容と、変更検知用の署名。作成不要なら None。"""
     start = event.period.start.at
@@ -59,17 +71,9 @@ def build_payload(event: BoostEvent, now: datetime) -> tuple[dict, str] | None:
         # 開始済み: Discord 側で開始時刻を過去にはできない
         return None
 
-    description_lines = [f"・{value}" for value in event.buffs_all]
-    if event.buffs_premium:
-        description_lines.append("プレミアムセット有効期間中:")
-        description_lines += [f"・{value}" for value in event.buffs_premium]
-    description_lines.append(f"開催期間: {event.period.display()}")
-    if event.url:
-        description_lines.append(f"告知: {event.url}")
-
     payload = {
         "name": event.label,
-        "description": "\n".join(description_lines),
+        "description": "\n".join(_description_lines(event)),
         "start": start,
         "end": end,
         "location": event.location,
@@ -82,6 +86,39 @@ def build_payload(event: BoostEvent, now: datetime) -> tuple[dict, str] | None:
         ).encode("utf-8")
     ).hexdigest()[:16]
     return payload, signature
+
+
+def build_details_payload(event: BoostEvent, now: datetime) -> tuple[dict, str] | None:
+    """開催中のイベントを更新する内容（時刻なし）と署名。対象外なら None。
+
+    開始後に告知記事の詳細が分かった場合、通知の Location は対象クエストに
+    変わるのに Discord 側の場所が古いままになる。開始時刻を送らずに
+    名前・説明・場所だけを更新して、両者をそろえる。
+    """
+    start = event.period.start.at
+    end = event.period.end.at
+    if start is None or end is None:
+        return None
+    if start > now or end <= now:
+        return None
+
+    payload = {
+        "name": event.label,
+        "description": "\n".join(_description_lines(event)),
+        "location": event.location,
+    }
+    signature = "details:" + hashlib.sha1(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return payload, signature
+
+
+def _is_not_found(exc: DiscordApiError) -> bool:
+    """ステータスコードが取れればそれを使い、旧式の文字列にもフォールバックする。"""
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        return status == 404
+    return "HTTP 404" in str(exc)
 
 
 def _parse_discord_time(value) -> datetime | None:
@@ -110,6 +147,10 @@ def find_duplicate(events: list[dict], payload: dict) -> dict | None:
         if not isinstance(candidate, dict):
             continue
         if str(candidate.get("status") or "").lower() in {"completed", "canceled"}:
+            continue
+        # EXTERNAL 以外（種別不明を含む）は entity_metadata.location が Discord に
+        # 無視されるため再利用しない
+        if candidate.get("entity_type") != ENTITY_TYPE_EXTERNAL:
             continue
         if str(candidate.get("name") or "") != name:
             continue
@@ -174,8 +215,68 @@ def sync_events(
         if built is None:
             if entry is None:
                 result.skipped += 1
-            else:
-                result.links[event.key] = api.event_url(entry["id"])
+                continue
+
+            result.links[event.key] = api.event_url(entry["id"])
+            details = build_details_payload(event, now)
+            if details is None:
+                continue
+            details_payload, details_signature = details
+            if entry.get("signature") == details_signature:
+                continue
+
+            # 作成時と内容が同じなら、署名だけ差し替えて PATCH を省く
+            unchanged = build_payload(
+                event, event.period.start.at - timedelta(seconds=1)
+            )
+            if (
+                not dry_run
+                and unchanged is not None
+                and entry.get("signature") == unchanged[1]
+            ):
+                state.set_discord_event(
+                    event.key,
+                    {
+                        "id": entry["id"],
+                        "signature": details_signature,
+                        "name": event.label,
+                        "end": entry.get("end") or (end.isoformat() if end else ""),
+                    },
+                )
+                continue
+
+            if dry_run:
+                log.info("[dry-run] 開始済みイベントの内容更新: %s", event.label)
+                result.updated += 1
+                continue
+            try:
+                api.update_details(entry["id"], **details_payload)
+            except DiscordApiError as exc:
+                if _is_not_found(exc):
+                    # 開始済みなので作り直すことはできない。追跡だけ諦める
+                    log.warning("Discord 側にイベントが無いため追跡を停止: %s", event.label)
+                    state.remove_discord_event(event.key)
+                    result.links.pop(event.key, None)
+                    result.errors += 1
+                    result.error_messages.append(
+                        f"開始済みイベントが Discord 側に無いため追跡停止「{event.label}」: {exc}"
+                    )
+                else:
+                    log.error("開始済みイベントの更新に失敗 (%s): %s", event.label, exc)
+                    result.errors += 1
+                    result.error_messages.append(f"更新失敗「{event.label}」: {exc}")
+                continue
+            state.set_discord_event(
+                event.key,
+                {
+                    "id": entry["id"],
+                    "signature": details_signature,
+                    "name": event.label,
+                    "end": entry.get("end") or (end.isoformat() if end else ""),
+                },
+            )
+            result.updated += 1
+            log.info("開始済み Discord イベントを更新: %s", event.label)
             continue
 
         payload, signature = built
@@ -255,7 +356,7 @@ def sync_events(
         try:
             api.update(entry["id"], **payload)
         except DiscordApiError as exc:
-            if "HTTP 404" not in str(exc):
+            if not _is_not_found(exc):
                 log.error("イベント更新に失敗 (%s): %s", event.label, exc)
                 result.errors += 1
                 result.error_messages.append(f"更新失敗「{event.label}」: {exc}")
@@ -328,7 +429,7 @@ def _delete_stale(
         try:
             api.delete(entry["id"])
         except DiscordApiError as exc:
-            if "HTTP 404" in str(exc):
+            if _is_not_found(exc):
                 state.remove_discord_event(key)
                 continue
             log.error("イベント削除に失敗 (%s): %s", entry.get("name") or key, exc)
